@@ -1,6 +1,6 @@
 # Mechanics
 
-See [rules profiles and tactics](TACTICS.md) for the Recoverable overrides and new inventory interactions. The health table below describes High stakes.
+See [tactics](TACTICS.md) for inventory interactions. All game modes use the same consequences and full toolset; the AI chooses its response freely.
 
 ## The experiment
 

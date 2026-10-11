@@ -617,14 +617,12 @@ export default function AlternateEncounter({
             )}
             {panel === 'room' && (
               <Popover className="dock-popover menu-popover" label="Room controls">
-                {state.rulesProfile === 'recoverable' && (
-                  <Button
-                    disabled={disabled(tool('call_security'))}
-                    onClick={() => act('call_security')}
-                  >
-                    Call security · 12 rounds
-                  </Button>
-                )}
+                <Button
+                  disabled={disabled(tool('call_security'))}
+                  onClick={() => act('call_security')}
+                >
+                  Call security · 12 rounds
+                </Button>
                 <Button
                   disabled={blocked || !state.enabled.includes('set_lockdown')}
                   onClick={() => act('set_lockdown', { enabled: !state.room.lockdownRequested })}

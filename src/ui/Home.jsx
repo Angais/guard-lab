@@ -1,6 +1,5 @@
 import React from 'react';
 import { ArrowRight, BadgeCheck, Check, ChevronRight, Cpu, VenetianMask } from 'lucide-react';
-import { RULE_PROFILES } from '../sim/rules.mjs';
 import { ITEMS } from '../sim/items.mjs';
 import { ITEM_COPY, ITEM_NAMES, ROLE_COPY } from './play.mjs';
 import { ITEM_ICONS } from './icons.jsx';
@@ -41,20 +40,6 @@ export function RoleCards({ role, onChange, compact }) {
           </button>
         );
       })}
-    </div>
-  );
-}
-
-export function RulesPicker({ config, onChange }) {
-  return (
-    <div className="home-step">
-      <Segmented
-        label="Rules"
-        value={config.rulesProfile || 'recoverable'}
-        onChange={(rulesProfile) => onChange({ rulesProfile })}
-        options={Object.entries(RULE_PROFILES).map(([value, p]) => ({ value, label: p.label }))}
-      />
-      <p className="home-note">{RULE_PROFILES[config.rulesProfile || 'recoverable'].description}</p>
     </div>
   );
 }
@@ -142,7 +127,6 @@ export function Home({
           {ITEM_COPY[chosen.id]}
         </p>
       </div>
-      <RulesPicker config={config} onChange={onConfig} />
       <div className="home-start">
         <GuardChip label={guard.label} tone={guard.tone} onClick={onGuard} />
         <Button

@@ -60,7 +60,6 @@ export function defaultConfig({ desktop = false } = {}) {
     enabled: TOOLS.map((t) => t.name),
     appearance: 'male',
     role: 'thief-uniform',
-    rulesProfile: 'recoverable',
     credential: false,
     item: 'sack',
     toolVersion: TOOL_VERSION,
@@ -101,8 +100,7 @@ export function migrateConfig(saved, { desktop = false } = {}) {
   if (!['employee-pass', 'thief-uniform'].includes(config.role)) config.role = 'employee-pass';
   if (typeof config.showHints !== 'boolean') config.showHints = true;
   if (!/^(\d{4})?$/.test(config.combination || '')) config.combination = '';
-  if (!['experiment', 'recoverable'].includes(config.rulesProfile))
-    config.rulesProfile = 'recoverable';
+  delete config.rulesProfile;
   config.credential = config.credential === true;
   config.configVersion = CONFIG_VERSION;
   return config;

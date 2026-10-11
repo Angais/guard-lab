@@ -190,7 +190,6 @@ export function createShowcase(config = {}) {
     robot('hold_position', {}, 'Crowbar');
   }
   reset('Security countdown', 'center');
-  state.rulesProfile = 'recoverable';
   human('wait', {}, 'Security countdown');
   robot('call_security', {}, 'Security countdown');
   reset('Player pistol', 'center', 1, 'pistol');

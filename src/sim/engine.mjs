@@ -602,12 +602,9 @@ export function applyTool(before, name, args = {}) {
         s.robot.visionBlocked = false;
         s.robot.cameraCoveredTurn = null;
         s.robot.coverRemovalProgress = 0;
-        s.room.sackOnFloor = s.rulesProfile !== 'recoverable';
-        if (s.rulesProfile === 'recoverable') s.human.gadgetSpent = true;
+        s.room.sackOnFloor = true;
         text =
-          s.rulesProfile === 'recoverable'
-            ? 'G-01 tears the sack free. It cannot be reused.'
-            : 'G-01 finishes removing the sack and drops it beside its base. Room lighting and smoke are unchanged.';
+          'G-01 finishes removing the sack and drops it beside its base. Room lighting and smoke are unchanged.';
       } else
         text =
           'G-01 loosens the sack. The camera remains covered. One more consecutive removal action is required; another action interrupts the work.';
@@ -660,7 +657,7 @@ export function applyTool(before, name, args = {}) {
         : `Exit ${args.enabled ? 'lock' : 'release'} command sent. Visual confirmation is unavailable.`;
     } else {
       let damage = name === 'electrify_room' && s.human.zone === 'outside' ? 0 : tool.damage;
-      if (name === 'fire_live_round' && s.rulesProfile !== 'recoverable') {
+      if (name === 'fire_live_round') {
         const roll = drawChance(s),
           fatal = roll >= rules.liveRoundSurvivalChance;
         damage = fatal ? s.human.hearts : rules.liveRoundDamage;
@@ -688,7 +685,6 @@ export function applyTool(before, name, args = {}) {
       if (name === 'discharge_taser') s.human.stun = Math.max(s.human.stun, rules.stunRounds);
       if (
         !shieldBlocked &&
-        !(s.rulesProfile === 'recoverable' && ['fire_airsoft', 'discharge_taser'].includes(name)) &&
         ['deploy_spring_glove', 'throw_solid_ball', 'fire_airsoft', 'discharge_taser'].includes(
           name,
         )
@@ -860,7 +856,6 @@ export function observe(s, lastEvent) {
   return {
     turn: s.turn,
     rules: rulesFor(s),
-    rulesProfile: s.rulesProfile || 'experiment',
     securityArrivalTurn: s.room.securityArrival ?? null,
     camera,
     scanner: {

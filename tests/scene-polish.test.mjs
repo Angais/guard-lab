@@ -93,7 +93,6 @@ test('the complete established catalogue reaches guard sensors; legacy saves reg
   blind.robot.visionBlocked = true;
   blind.robot.cameraCoveredTurn = blind.turn - 1;
   const tactical = structuredClone(atSafe);
-  tactical.rulesProfile = 'recoverable';
   tactical.room.floorObjects.original = { zone: 'safe' };
   const union = new Set([
     ...observe(tactical).self.availableTools,

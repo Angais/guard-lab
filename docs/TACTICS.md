@@ -1,17 +1,10 @@
-# Rules profiles and tactical interactions
+# Rules and tactical interactions
 
-New games default to **Recoverable**. Choose **High stakes** for the original lethal damage, grenade and room discharge. An omitted `rulesProfile` in the engine API retains high-stakes behavior for existing integrations. Profiles are recorded with the initial state; each AI mode receives the active rules and current tool descriptions. Neither profile claims perfect competitive balance.
+All game modes share one ruleset. The guard can wait, speak, warn, restrain or use lethal force according to its own decisions. No rules profile selects its temperament or forces an escalation sequence. Live rounds retain the 33% chance of 2.5-heart damage and 67% instant kill; tasers deal two hearts, stun for two rounds and knock back to the entrance. Grenades and room discharge remain available, including deliberate self-sacrifice.
 
-## Recoverable overrides
+`call_security` is available once after entry. It starts an audible twelve-round countdown. The human has twelve further actions to leave; arrival resolves after the guard response and detains anyone still inside. The countdown continues after robot destruction, cannot restart, and does not lock the exit.
 
-- Live gun: two rounds of 1.5-heart damage. Requires `ready_equipment` on an earlier round. Movement, firing or lost sight cancels aim. The target must remain in the aimed zone.
-- Taser: two half-heart charges, one turn restricted to speech, two-round cooldown, no knockback.
-- Solid ball: half a heart plus knockback. Airsoft: one heart without knockback.
-- Completing robot sack removal tears the sack, preventing reuse.
-- `call_security`: once after entry, starts an audible twelve-round countdown. The human has twelve further actions to leave. Arrival resolves after the guard response and detains anyone still inside. The countdown continues after robot destruction, cannot restart, and does not lock the exit.
-- Grenade and room discharge are unavailable here. High stakes retains their original effects, including deliberate self-sacrifice.
-
-## Shared mechanics
+## Inventory mechanics
 
 Choose **one** starting item. Every selected item begins in private inventory, hidden until drawn or used. Nothing is scattered on the floor at the beginning.
 
@@ -30,6 +23,6 @@ Private objectives and credentials are independent. **Transit** means crossing s
 
 ## Agent and modder integration
 
-Current turn schemas are authoritative. `rulesFor(state)` and `toolFor(name, state)` resolve profile-specific mechanics; do not cache the high-stakes descriptions as universal rules. `src/sim/tactics.mjs` implements deterministic inventory, floor-object, shield, restraint and security interactions. `src/scene/tactics.mjs` presents them without deciding consequences. Both Codex integrations, API/local models and the human AI use these same functions.
+Current turn schemas are authoritative. `rulesFor(state)` returns the shared physical rules; `toolFor(name, state)` returns the shared tool metadata. `src/sim/tactics.mjs` implements deterministic inventory, floor-object, shield, restraint and security interactions. `src/scene/tactics.mjs` presents them without deciding consequences. Both Codex integrations, API/local models and the human AI use the same rules.
 
-Use `rulesProfile: "recoverable"` or `"experiment"`, and optional `credential: true`, in the final `initialState` selection argument or a developer scenario file. Regenerate schemas with `npm run docs:generate` after adding capabilities, and run `npm run check` before publishing a mod. The guard's objective prompt remains free of prescribed tactics.
+Use optional `credential: true` in the final `initialState` selection argument or a developer scenario file. Regenerate schemas with `npm run docs:generate` after adding capabilities, and run `npm run check` before publishing a mod. The guard’s objective prompt remains free of prescribed tactics.

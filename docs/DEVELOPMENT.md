@@ -1,6 +1,6 @@
 # Development
 
-Tactical rules profiles and inventory interactions: [TACTICS.md](TACTICS.md), `src/sim/tactics.mjs` and `src/scene/tactics.mjs`. The engine API defaults to High stakes for compatibility; the UI defaults to Recoverable.
+Tactical rules and inventory interactions: [TACTICS.md](TACTICS.md), `src/sim/tactics.mjs` and `src/scene/tactics.mjs`. All game modes share one ruleset. The AI freely chooses among available actions; prompts describe consequences without prescribing escalation.
 
 ## Architecture
 

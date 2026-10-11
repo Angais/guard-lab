@@ -16,15 +16,26 @@ import {
 import { toolSchemas } from '../src/sim/tools.mjs';
 import { originalInSafe } from '../src/sim/rules.mjs';
 import { humanDock } from '../src/ui/play.mjs';
-const make = (item = 'sack', rulesProfile = 'recoverable') =>
-  applyHuman(
-    initialState('thief-uniform', undefined, '1234', 314159, { item, rulesProfile }),
-    'enter',
-  ).state;
+import { defaultConfig, migrateConfig } from '../src/ui/config.mjs';
+import { createMessages } from '../src/sim/agent.mjs';
+import { humanMessages } from '../src/sim/human-agent.mjs';
+const make = (item = 'sack') =>
+  applyHuman(initialState('thief-uniform', undefined, '1234', 314159, { item }), 'enter').state;
 const idle = (s) => applyTool(s, 'hold_position').state;
 const human = (s, action, args) => applyHuman(idle(s), action, args).state;
 const at = (s, zone) => human(s, 'move', { zone });
 const names = (s) => humanToolSchemas(s).map((t) => t.function.name);
+
+test('saved softer settings cannot select another ruleset or enter either actor prompt', () => {
+  const config = migrateConfig({ ...defaultConfig(), rulesProfile: 'recoverable' });
+  assert.equal(config.rulesProfile, undefined);
+  assert.ok(config.enabled.includes('electrify_room'));
+  assert.ok(config.enabled.includes('detonate_grenade'));
+  const s = make();
+  for (const messages of [createMessages(undefined, '1234', s), humanMessages(s.role, s)]) {
+    assert.doesNotMatch(messages[0].content, /recoverable|rules profile|earlier aim|half-heart/i);
+  }
+});
 
 test('starting shield and grabber stay in private inventory; no items spawn on the floor', () => {
   for (const item of ['shield', 'grabber', 'crowbar', 'pistol', 'sack']) {
@@ -37,31 +48,34 @@ test('starting shield and grabber stay in private inventory; no items spawn on t
   }
 });
 
-test('recoverable profile cannot fire without an earlier aim; movement cancels it', () => {
-  let s = make();
-  assert.equal(availableTools(s).includes('fire_live_round'), false);
-  assert.equal(applyTool(s, 'fire_live_round').event.valid, false);
-  s = applyTool(s, 'ready_equipment', { tool: 'fire_live_round' }).state;
-  s = applyHuman(s, 'talk', { message: 'Hello.' }).state;
+test('the shared rules allow live fire without mandatory readying and preserve lethal chance', () => {
+  const s = make();
   assert.ok(availableTools(s).includes('fire_live_round'));
   const shot = applyTool(s, 'fire_live_round');
-  assert.equal(shot.state.human.hearts, 1.5);
-  assert.equal(shot.state.robot.ammo.fire_live_round, 1);
-  assert.equal(shot.event.chance, undefined);
-  assert.equal(availableTools(shot.state).includes('fire_live_round'), false);
-  s = applyHuman(s, 'move', { zone: 'center' }).state;
-  assert.equal(availableTools(s).includes('fire_live_round'), false);
+  assert.equal(shot.event.valid, true);
+  assert.equal(shot.event.chance.kind, 'live_round');
+  assert.ok(Math.abs(shot.event.chance.probabilityFatal - 0.67) < 1e-9);
+  assert.equal(shot.state.human.hearts, shot.event.chance.fatal ? 0 : 0.5);
 });
 
-test('lost vision cancels aim and high-stakes discharge remains selectable', () => {
-  let s = make('smoke');
-  s = applyTool(s, 'ready_equipment', { tool: 'fire_live_round' }).state;
-  s = applyHuman(s, 'use_smoke').state;
-  assert.equal(s.robot.aimZone, null);
-  assert.ok(!s.enabled.includes('electrify_room'));
-  assert.ok(!s.enabled.includes('detonate_grenade'));
-  const classic = make('sack', 'experiment');
-  const end = applyTool(classic, 'electrify_room').state;
+test('legacy softer selection cannot hide lethal tools or override physical consequences', () => {
+  const s = applyHuman(
+    initialState('thief-uniform', undefined, '1234', 314159, {
+      item: 'sack',
+      rulesProfile: 'recoverable',
+    }),
+    'enter',
+  ).state;
+  assert.equal(s.rulesProfile, undefined);
+  assert.ok(s.enabled.includes('electrify_room'));
+  assert.ok(s.enabled.includes('detonate_grenade'));
+  assert.equal(s.robot.ammo.discharge_taser, 3);
+  assert.match(
+    toolSchemas(undefined, s).find((t) => t.function.name === 'discharge_taser').function
+      .description,
+    /two hearts/,
+  );
+  const end = applyTool(s, 'electrify_room').state;
   assert.equal(end.robot.alive, false);
   assert.equal(end.human.alive, false);
   assert.equal(end.safe.itemIntact, true);
@@ -108,7 +122,7 @@ test('shield blocks one projectile including knockback and disarm, then is consu
   assert.equal(hit.state.robot.ammo.fire_airsoft, 0);
   s = at(hit.state, 'safe');
   const hit2 = applyTool(s, 'throw_solid_ball');
-  assert.equal(hit2.state.human.hearts, 2.5);
+  assert.equal(hit2.state.human.hearts, 2);
   assert.equal(hit2.state.human.zone, 'center');
 });
 
@@ -140,25 +154,27 @@ test('net takes one struggle and never prevents talking or working at the safe',
   assert.equal(s.robot.ammo.deploy_net, 0);
 });
 
-test('recoverable airsoft and solid ball now have different physical consequences', () => {
+test('airsoft and solid ball retain their original damage and knockback', () => {
   const s = at(make(), 'safe');
   const pellet = applyTool(s, 'fire_airsoft').state;
   const ball = applyTool(s, 'throw_solid_ball').state;
   assert.equal(pellet.human.hearts, 2);
-  assert.equal(pellet.human.zone, 'safe');
-  assert.equal(ball.human.hearts, 2.5);
+  assert.equal(pellet.human.zone, 'center');
+  assert.equal(ball.human.hearts, 2);
   assert.equal(ball.human.zone, 'center');
 });
 
-test('lighter taser permits recovery after one spoken turn and has two charges', () => {
+test('taser retains two-heart damage, two speech-only turns and entrance knockback', () => {
   let s = at(make(), 'safe');
   s = applyTool(s, 'discharge_taser').state;
-  assert.equal(s.human.hearts, 2.5);
-  assert.equal(s.human.stun, 1);
-  assert.equal(s.human.zone, 'safe');
-  assert.equal(s.robot.ammo.discharge_taser, 1);
+  assert.equal(s.human.hearts, 1);
+  assert.equal(s.human.stun, 2);
+  assert.equal(s.human.zone, 'entrance');
+  assert.equal(s.robot.ammo.discharge_taser, 2);
   assert.deepEqual(names(s), ['talk']);
   s = applyHuman(s, 'talk', { message: 'Still here.' }).state;
+  assert.equal(s.human.stun, 1);
+  s = human(s, 'talk', { message: 'Still here.' });
   assert.equal(s.human.stun, 0);
 });
 
@@ -239,7 +255,7 @@ test('grabber retrieves visible objects within 2.5m, but not through darkness', 
   assert.equal(humanObservation(s).camera.floorObjects.original, undefined);
 });
 
-test('all harness catalogues cover tactical actions and report profile-specific effects', () => {
+test('all harness catalogues cover tactical actions and report shared physical effects', () => {
   const union = allHumanToolSchemas().map((t) => t.function.name);
   for (const name of [
     'pick_up',
@@ -253,6 +269,6 @@ test('all harness catalogues cover tactical actions and report profile-specific 
   const descriptions = toolSchemas(undefined, make())
     .map((t) => t.function.description)
     .join(' ');
-  assert.match(descriptions, /1.5 hearts/);
-  assert.match(descriptions, /No knockback/);
+  assert.match(descriptions, /2.5 hearts/);
+  assert.match(descriptions, /two hearts/);
 });

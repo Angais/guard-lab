@@ -4,7 +4,7 @@
 
 Cross the room, earn the guard’s trust, talk your way into the safe, or try to steal what’s inside. The guard has one objective and chooses its own response. Both sides take one action per round, brought to life in 3D with voiced dialogue.
 
-**Recoverable** adds aimed shots, lighter stun and an optional security countdown. **High stakes** keeps the original lethal tools. Disarm and retrieve dropped objects, choose a shield or grabber, or pry the safe with a crowbar. Your objective and transit pass are separate choices. [Rules and tactics](docs/TACTICS.md).
+One shared ruleset gives the guard its full range of responses, from waiting and talking to lethal force. The AI decides freely which action to take. Disarm and retrieve dropped objects, choose a shield or grabber, or pry the safe with a crowbar. Your objective and transit pass are separate choices. [Rules and tactics](docs/TACTICS.md).
 
 [See the current in-game graphics](docs/ingame.png).
 

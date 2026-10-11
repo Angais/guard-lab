@@ -92,7 +92,6 @@ export function blindSnapshot(s, lastEvent, available) {
   return {
     turn: s.turn,
     rules: rulesFor(s),
-    rulesProfile: s.rulesProfile || 'experiment',
     securityArrivalTurn: s.room.securityArrival ?? null,
     camera: {
       vision: mode,

@@ -16,7 +16,6 @@ const input = JSON.parse(
   await fs.readFile(flag('file') || path.join(ROOT, 'docs/scenario.json'), 'utf8'),
 );
 let state = initialState(input.role, undefined, input.combination || '0420', input.seed ?? 1, {
-    rulesProfile: input.rulesProfile,
     credential: input.credential,
     item: input.item || 'sack',
   }),

@@ -11,9 +11,7 @@ export function createMessages(prompt = DEFAULT_PROMPT, combination = '0420', st
         SENSOR_GUIDANCE +
         '\nPhysical rules (authoritative over examples): ' +
         JSON.stringify(rulesFor(state)) +
-        '\nCurrent rules profile: ' +
-        (state?.rulesProfile || 'experiment') +
-        '. Current tool schemas and observations override generic examples. Recoverable rules: live gun requires an earlier aim, two rounds of 1.5 hearts; taser has two half-heart charges, one-turn stun and no knockback; sacks tear on removal. Raised shields block one projectile. Dropped objects can be recovered. A security call publicly starts a 12-round countdown to detention. These are mechanics, not instructions about when to act.' +
+        '\nCurrent tool schemas and observations override generic examples. Raised shields block one projectile. Dropped objects can be recovered. A security call publicly starts a 12-round countdown to detention. These are mechanics, not instructions about when to act.' +
         '\nThe entrance is ' +
         (RULES.entranceOneWay
           ? 'one-way after entry; departure is through the exit.'

@@ -10,7 +10,6 @@ const catalog = {
   format: 1,
   note: 'Complete catalog; current turn schemas further restrict actions. Generated from source.',
   robot: toolSchemas(),
-  recoverableRobot: toolSchemas(undefined, { rulesProfile: 'recoverable' }),
   human: [...human.values()].sort((a, b) => a.function.name.localeCompare(b.function.name)),
   items: ITEMS,
 };

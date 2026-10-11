@@ -633,7 +633,7 @@ test('Invalid tools and arguments are rejected with the available list until a v
     const answers = await toolAnswers(h, 3);
     assert.equal(answers[0].response.result.success, false);
     assert.match(answers[0].response.result.contentItems[0].text, /"fire_laser" is not available/);
-    assert.match(answers[0].response.result.contentItems[0].text, /Available tools: speak,/);
+    assert.match(answers[0].response.result.contentItems[0].text, /Available tools: .*speak,/);
     assert.match(
       answers[1].response.result.contentItems[0].text,
       /missing required argument "message"/,

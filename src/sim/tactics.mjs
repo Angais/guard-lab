@@ -40,7 +40,6 @@ const BUSY_HANDS = [
 ];
 
 export function initializeTactics(s, selection) {
-  s.rulesProfile = selection.rulesProfile === 'recoverable' ? 'recoverable' : 'experiment';
   s.human.hasPass = s.role === 'employee-pass' || selection.credential === true;
   Object.assign(s.human, {
     shield: s.human.gadgetId === 'shield',
@@ -55,11 +54,7 @@ export function initializeTactics(s, selection) {
   s.room.securityArrival = null;
   s.robot.aimZone = null;
   s.robot.aimTurn = null;
-  if (s.rulesProfile === 'recoverable') {
-    s.enabled = s.enabled.filter((n) => !['electrify_room', 'detonate_grenade'].includes(n));
-    s.robot.ammo.fire_live_round = 2;
-    s.robot.ammo.discharge_taser = 2;
-  }
+
   return s;
 }
 
@@ -161,13 +156,8 @@ export function applyTacticalHuman(s, action, args) {
 }
 
 export function tacticalToolBlock(s, name, vision) {
-  if (
-    name === 'call_security' &&
-    (s.rulesProfile !== 'recoverable' ||
-      s.room.securityArrival != null ||
-      s.human.zone === 'outside')
-  )
-    return 'Security can be called once after entry, in the recoverable profile.';
+  if (name === 'call_security' && (s.room.securityArrival != null || s.human.zone === 'outside'))
+    return 'Security can be called once after entry.';
   if (name === 'deploy_net' && (s.human.restrained || s.human.zone === 'outside'))
     return 'No unrestrained target inside the room.';
   if (name === 'recover_item') {
@@ -180,12 +170,6 @@ export function tacticalToolBlock(s, name, vision) {
     )
       return 'No visible dropped object is within arm’s reach.';
   }
-  if (
-    name === 'fire_live_round' &&
-    s.rulesProfile === 'recoverable' &&
-    (s.robot.ready !== name || s.robot.aimZone !== s.human.zone || !(s.robot.aimTurn < s.turn))
-  )
-    return 'Aim the live gun on an earlier round. Movement or lost visual contact cancels the aim.';
   return null;
 }
 export function resolveTacticalTool(s, name) {
