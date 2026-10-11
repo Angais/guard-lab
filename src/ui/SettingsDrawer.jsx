@@ -435,7 +435,7 @@ export function SettingsDrawer({
           <h3>Voices</h3>
           <Toggle
             label="Spoken voices"
-            description="Read every line aloud. Subtitles always show."
+            description="Read the other side’s lines aloud. Subtitles always show. Voices are AI-generated."
             checked={config.voice.speech}
             onChange={(speech) => updateVoice({ speech })}
           />
