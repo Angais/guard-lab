@@ -113,6 +113,10 @@ ipcMain.handle('model:test', async (_, config) => {
   const response = await fetch(endpoint(config.endpoint, '/models'), {
     headers: config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {},
     signal: AbortSignal.timeout(15000),
+  }).catch(() => {
+    throw new Error(
+      `Nothing is answering at ${config.endpoint}. Start your model server (for example Ollama) and try again.`,
+    );
   });
   if (!response.ok)
     throw new Error(`Connection failed (${response.status}). Check the endpoint and API key.`);
