@@ -144,7 +144,7 @@ export function createShowcase(config = {}) {
   robot('hold_position', {}, 'Clear own camera');
   for (const tool of devices) {
     reset(tool.label, 'safe', tool.name === 'fire_live_round' ? 8192 : 0x6d2b79f5);
-    if (!['throw_foam_ball', 'throw_solid_ball'].includes(tool.name)) {
+    if (!['throw_foam_ball', 'throw_solid_ball', 'deploy_net'].includes(tool.name)) {
       human('wait', {}, tool.label);
       robot('ready_equipment', { tool: tool.name }, tool.label);
       human('wait', {}, tool.label);
@@ -170,6 +170,29 @@ export function createShowcase(config = {}) {
       }
     }
   }
+  reset('Drop and recover', 'safe');
+  human('combination', { code: '6284' }, 'Drop and recover');
+  robot('hold_position', {}, 'Drop and recover');
+  human('take_item', {}, 'Drop and recover');
+  robot('throw_foam_ball', {}, 'Drop and recover');
+  human('talk', { message: 'I dropped it.' }, 'Drop and recover');
+  robot('recover_item', {}, 'Drop and recover');
+  reset('Shield', 'entrance', 1, 'shield');
+  human('raise_shield', {}, 'Shield');
+  robot('fire_airsoft', {}, 'Shield');
+  reset('Grabber', 'center', 1, 'grabber');
+  state.room.floorObjects.original = { zone: 'safe' };
+  human('pick_up', { object: 'original' }, 'Grabber');
+  robot('hold_position', {}, 'Grabber');
+  reset('Crowbar', 'safe', 1, 'crowbar');
+  for (let i = 0; i < 4; i++) {
+    human('pry_safe', {}, 'Crowbar');
+    robot('hold_position', {}, 'Crowbar');
+  }
+  reset('Security countdown', 'center');
+  state.rulesProfile = 'recoverable';
+  human('wait', {}, 'Security countdown');
+  robot('call_security', {}, 'Security countdown');
   reset('Player pistol', 'center', 1, 'pistol');
   human('aim_pistol', {}, 'Player pistol');
   robot('hold_position', {}, 'Player pistol');

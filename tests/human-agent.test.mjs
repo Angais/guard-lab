@@ -11,7 +11,7 @@ import {
 import { ITEMS } from '../src/sim/items.mjs';
 const make = (item) =>
   applyHuman(initialState('thief-uniform', undefined, '9276', 1, { item }), 'enter').state;
-test('human AI chooses its item from eight without receiving the safe combination', async () => {
+test('human AI chooses its item from the catalogue without receiving the safe combination', async () => {
   let payload;
   const item = await chooseHumanLoadout({
     role: 'thief-uniform',
@@ -27,7 +27,7 @@ test('human AI chooses its item from eight without receiving the safe combinatio
     },
   });
   assert.equal(item, 'pistol');
-  assert.equal(payload.tools[0].function.parameters.properties.item.enum.length, 8);
+  assert.equal(payload.tools[0].function.parameters.properties.item.enum.length, 11);
   assert.ok(!JSON.stringify(payload).includes('9276'));
 });
 test('human observes own role and items but cannot see the private code or hidden guard choices', () => {

@@ -78,7 +78,7 @@ test('high ready clears moving humans on every presentation route', () => {
       }
 });
 test('the complete established catalogue reaches guard sensors; legacy saves regain lockdown', () => {
-  assert.equal(TOOLS.length, 22);
+  assert.equal(TOOLS.length, 25);
   const defaults = { enabled: TOOLS.map((t) => t.name) };
   const old = { toolVersion: 4, enabled: defaults.enabled.filter((n) => n !== 'set_lockdown') };
   const config = migrateToolConfig(old, defaults);
@@ -92,14 +92,18 @@ test('the complete established catalogue reaches guard sensors; legacy saves reg
   const blind = structuredClone(atSafe);
   blind.robot.visionBlocked = true;
   blind.robot.cameraCoveredTurn = blind.turn - 1;
+  const tactical = structuredClone(atSafe);
+  tactical.rulesProfile = 'recoverable';
+  tactical.room.floorObjects.original = { zone: 'safe' };
   const union = new Set([
+    ...observe(tactical).self.availableTools,
     ...observe(atSafe).self.availableTools,
     ...observe(blind).self.availableTools,
   ]);
   assert.deepEqual(
     union,
     new Set(TOOLS.map((t) => t.name)),
-    'all 22 catalogue tools are offered under their physical conditions',
+    'all catalogue tools are offered under their physical conditions',
   );
   const modern = migrateToolConfig({ ...old, toolVersion: TOOL_VERSION }, defaults);
   assert.ok(!modern.enabled.includes('set_lockdown'), 'explicit current-version choices persist');

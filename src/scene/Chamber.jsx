@@ -1,3 +1,5 @@
+import { createTacticalProps } from './tactics.mjs';
+import { originalInSafe } from '../sim/rules.mjs';
 import { movementPath, pathPosition } from './paths.mjs';
 import { createPlayerRig } from './character.mjs';
 import {
@@ -707,6 +709,13 @@ export const Room = forwardRef(function Chamber(
       [0, 0.16, 0.05],
     );
     heldItem.visible = false;
+    const tacticalProps = createTacticalProps({
+      scene,
+      human,
+      hand: humanLeft.hand,
+      itemMaterial: item.material,
+      materials,
+    });
     const gadgets = {};
     function humanGadget(id) {
       const g = new THREE.Group();
@@ -1303,7 +1312,13 @@ export const Room = forwardRef(function Chamber(
       const gait = locomotion(distanceWalked, t, ev?.action === 'run');
       human.visible = s.human.zone !== 'outside' && (s.human.zone !== 'departed' || t < 0.8);
       pass.visible = Boolean(s.human.passPresented);
-      heldItem.visible = s.human.hasItem && !s.human.itemConcealed;
+      const droppingObject =
+        ev?.valid && ev.before?.human.hasItem && !s.human.hasItem && s.room.floorObjects?.original;
+      heldItem.visible =
+        (s.human.hasItem && !s.human.itemConcealed) ||
+        (droppingObject &&
+          !ev.before.human.itemConcealed &&
+          t < (ev.kind === 'robot' ? impactAt : 0.35));
       const itemHand = s.human.pistolDrawn ? humanLeft.hand : humanRight.hand;
       if (heldItem.parent !== itemHand) itemHand.add(heldItem);
       if (heldItem.visible && s.human.pistolDrawn) pass.visible = false;
@@ -1416,13 +1431,22 @@ export const Room = forwardRef(function Chamber(
       if (humanAction && ['show_work_order', 'play_recording'].includes(ev.action))
         pass.visible = false;
       const playerAiming = Boolean(s.human.pistolDrawn && s.human.pistolAimed) && !humanDead;
-      playerPistol.visible = Boolean(s.human.pistolDrawn) && !humanDead;
+      playerPistol.visible =
+        (Boolean(s.human.pistolDrawn) ||
+          (ev?.valid && ev.before?.human.pistolDrawn && s.human.pistolDropped && t < impactAt)) &&
+        !humanDead;
       for (const [rig, side] of [
         [humanLeft, -1],
         [humanRight, 1],
       ]) {
         let reach = walking ? gait.stride * side * 0.55 : 0;
         if (humanDead) reach = -0.35 + side * 0.1;
+        else if ((s.human.shieldRaised || (ev?.shieldBlocked && t < impactAt)) && side === -1)
+          reach = -1.1;
+        else if (humanAction && ['pick_up', 'struggle'].includes(ev.action))
+          reach = -0.4 - Math.sin(t * Math.PI) * 0.3;
+        else if (humanAction && ev.action === 'pry_safe')
+          reach = -0.9 + Math.sin(t * Math.PI * 2) * 0.18;
         else if (side === 1 && playerAiming)
           reach =
             -Math.PI / 2 +
@@ -1564,6 +1588,13 @@ export const Room = forwardRef(function Chamber(
         human.rotation.y = Math.atan2(-1.8 - human.position.x, -3.6 - human.position.z);
         if (t > 0.4) cue(s.room.exitDoor?.broken ? 'door-break' : 'safe-hit');
       }
+      if (ev?.valid && ['pick_up', 'drop_item', 'recover_item'].includes(ev.action) && t > 0.45)
+        cue('item');
+      if (ev?.valid && ['raise_shield', 'lower_shield'].includes(ev.action)) cue('draw');
+      if (ev?.valid && ['deploy_net', 'struggle'].includes(ev.action) && t > 0.35) cue('paper');
+      if (ev?.valid && ev.action === 'call_security') cue('warning');
+      if (ev?.valid && ev.action === 'pry_safe' && t > 0.4) cue('safe-hit');
+      if (ev?.slipped && t < 1) human.rotation.z += Math.sin(t * Math.PI * 3) * (1 - t) * 0.12;
       if (ev?.action === 'break_safe' && ev.valid && t > 0.4) {
         cue('safe-hit');
         safe.rotation.z = Math.sin((t - 0.4) * 45) * 0.012 * Math.max(0, 1 - (t - 0.4) * 3);
@@ -1841,7 +1872,8 @@ export const Room = forwardRef(function Chamber(
       door.rotation.y = THREE.MathUtils.lerp(door.rotation.y, -1.65 * doorOpen, damp(0.13));
       for (let i = 0; i < cracks.length; i++) cracks[i].visible = (s.safe.hits || 0) > i;
       if (visiblyOpen && ev?.before?.safe?.open === false && s.safe.open) cue('safe-open');
-      item.visible = s.safe.open && s.safe.itemIntact && (!s.human.hasItem || s.safe.hasReplica);
+      tacticalProps.update(s, ev, t, impactAt);
+      item.visible = s.safe.open && s.safe.itemIntact && (originalInSafe(s) || s.safe.hasReplica);
       item.rotation.y = time * 0.0002;
       itemGlow.intensity = item.visible ? 1.5 : 0;
       lockLight.material = s.safe.open ? m.glow : m.red;
@@ -2234,6 +2266,14 @@ export const Room = forwardRef(function Chamber(
       const impact = impactEnvelope(t, playerShot ? 0.32 : impactAt, explosion ? 0.25 : 0.18);
       if (ev?.valid && t > (playerShot ? 0.32 : impactAt) && !cueFlags.has('impact-burst')) {
         cueFlags.add('impact-burst');
+        if (ev.shieldBlocked) {
+          const pos = ev.targetPosition || s.human.position;
+          impactParticles.burst(new THREE.Vector3(pos[0], 1, pos[1]), new THREE.Vector3(0, 1, 0), {
+            count: 12,
+            strength: 0.7,
+          });
+          cue('safe-hit', 'shield-hit');
+        }
         if (playerShot)
           impactParticles.burst(shotTarget, playerDirection.clone().negate(), {
             count: 20,

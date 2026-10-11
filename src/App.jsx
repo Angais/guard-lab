@@ -86,7 +86,7 @@ function makeRun(role, config, desktop) {
     initial: clone(state),
     state,
     events: [],
-    messages: createMessages(config.prompt, combination),
+    messages: createMessages(config.prompt, combination, state),
   };
 }
 const toneOf = (config, codex) =>
@@ -403,7 +403,7 @@ export default function App() {
         sessionId: record.id,
         actor: 'robot',
         system: record.messages[0].content,
-        allTools: toolSchemas(record.config.enabled),
+        allTools: toolSchemas(record.state.enabled, record.state),
         settings: codexSettings(),
       }),
     );
@@ -464,7 +464,7 @@ export default function App() {
               data,
               sessionId: working.id,
               actor: 'robot',
-              allTools: toolSchemas(working.config.enabled),
+              allTools: toolSchemas(working.state.enabled, working.state),
               codexSettings: codexSettings(),
               modelConfig: { endpoint: working.config.endpoint, model: working.config.model },
               ready: codexReady.current.get(working.id),
@@ -1066,6 +1066,18 @@ export default function App() {
             </div>
             <StatusChips
               chips={[
+                state.room.securityArrival != null && {
+                  text: `Security · ${Math.max(0, state.room.securityArrival - state.turn)} rounds`,
+                  tone: 'danger',
+                },
+                state.human.restrained && {
+                  text: 'Netted · free your legs in 1 action',
+                  tone: 'warn',
+                },
+                state.human.shieldRaised && {
+                  text: 'Shield raised · one projectile',
+                  tone: 'accent',
+                },
                 (isReplay || vision) &&
                   safeChip(state) && {
                     text: safeChip(state),

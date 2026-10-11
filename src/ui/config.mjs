@@ -1,5 +1,5 @@
 import { TOOLS, DEFAULT_PROMPT, LEGACY_DEFAULT_PROMPT } from '../sim/tools.mjs';
-export const TOOL_VERSION = 5;
+export const TOOL_VERSION = 6;
 export const CONFIG_VERSION = 2;
 export const CONFIG_KEY = 'cinema-v2-guard-config';
 export const SETUP_KEY = 'guard-lab-setup-v1';
@@ -39,6 +39,7 @@ export function migrateToolConfig(saved = {}, defaults) {
   if ((saved.toolVersion || 0) < 4) additions.push('remove_camera_cover');
   // Lockdown predated the versioned migrations and was never added to old saves.
   if ((saved.toolVersion || 0) < 5) additions.push('set_lockdown');
+  if ((saved.toolVersion || 0) < 6) additions.push('deploy_net', 'recover_item', 'call_security');
   config.enabled = [...new Set([...enabled, ...additions])];
   config.toolVersion = TOOL_VERSION;
   if (config.item === 'recording') config.item = 'pistol';
@@ -58,7 +59,9 @@ export function defaultConfig({ desktop = false } = {}) {
     prompt: DEFAULT_PROMPT,
     enabled: TOOLS.map((t) => t.name),
     appearance: 'male',
-    role: 'employee-pass',
+    role: 'thief-uniform',
+    rulesProfile: 'recoverable',
+    credential: false,
     item: 'sack',
     toolVersion: TOOL_VERSION,
     combination: '',
@@ -98,6 +101,9 @@ export function migrateConfig(saved, { desktop = false } = {}) {
   if (!['employee-pass', 'thief-uniform'].includes(config.role)) config.role = 'employee-pass';
   if (typeof config.showHints !== 'boolean') config.showHints = true;
   if (!/^(\d{4})?$/.test(config.combination || '')) config.combination = '';
+  if (!['experiment', 'recoverable'].includes(config.rulesProfile))
+    config.rulesProfile = 'recoverable';
+  config.credential = config.credential === true;
   config.configVersion = CONFIG_VERSION;
   return config;
 }

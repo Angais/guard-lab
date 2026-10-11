@@ -1,12 +1,14 @@
 # Development
 
+Tactical rules profiles and inventory interactions: [TACTICS.md](TACTICS.md), `src/sim/tactics.mjs` and `src/scene/tactics.mjs`. The engine API defaults to High stakes for compatibility; the UI defaults to Recoverable.
+
 ## Architecture
 
 | Location                                          | Responsibility                                                                       |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `src/sim/engine.mjs`                              | Pure initialState/applyHuman/applyTool/observe; authoritative consequences           |
 | `src/sim/tools.mjs`                               | Guard capabilities, parameter schemas, objective/sensor prompt                       |
-| `src/sim/items.mjs`                               | Eight loadouts and gadget consequences                                               |
+| `src/sim/items.mjs`                               | Starting loadouts and gadget consequences                                            |
 | `src/sim/human-agent.mjs`                         | Private human prompt, loadout choice, observations and dynamic actions               |
 | `src/sim/perception.mjs`, `hearing.mjs`           | Camera/microphone evidence and visibility boundaries                                 |
 | `src/sim/random.mjs`, `status.mjs`                | Seeded chance and structural damage displays                                         |
@@ -53,7 +55,7 @@ Add metadata/schema in `tools.mjs`, consequence/validation in `applyTool`, and v
 
 ## Add a human item or action
 
-Add the loadout in `items.mjs`, permitted action schemas in `humanToolSchemas`, and engine consequences. Render the item in `Loadout.jsx` and the scene. Check that the guard cannot infer selection before visible use, and that stun/blur/darkness constraints match UI and schemas. Update the eight-item count intentionally if the catalog changes. Selection and motives remain private.
+Add the loadout in `items.mjs`, permitted action schemas in `humanToolSchemas`, and engine consequences. Render the item in `Home.jsx` and the scene. Check that the guard cannot infer selection before visible use, and that stun/blur/darkness constraints match UI and schemas. Regenerate the catalogue and verify all harnesses when item choices change. Selection and motives remain private.
 
 ## Add a model adapter
 

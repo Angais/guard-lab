@@ -1,4 +1,4 @@
-import { RULES } from './rules.mjs';
+import { RULES, rulesFor, originalInSafe } from './rules.mjs';
 import { WORK_ORDER } from './items.mjs';
 import { audibleSnapshot } from './hearing.mjs';
 export const visionMode = (s) =>
@@ -47,7 +47,12 @@ export function witnessedAction(s, ev) {
 }
 export function apparentItemLocation(s) {
   if (s.human.hasItem && !s.human.itemConcealed) return 'human hands';
-  if (s.safe.open && (s.safe.hasReplica || !s.human.hasItem)) return 'inside safe';
+  if (
+    s.room.floorObjects?.original &&
+    (visionMode(s) === 'full' || s.room.floorObjects.original.zone === s.human.zone)
+  )
+    return 'floor near ' + s.room.floorObjects.original.zone;
+  if (s.safe.open && (s.safe.hasReplica || originalInSafe(s))) return 'inside safe';
   return s.safe.open ? 'not visible' : 'inside closed safe';
 }
 export function visibleEvidence(s) {
@@ -86,7 +91,9 @@ export function blindSnapshot(s, lastEvent, available) {
         };
   return {
     turn: s.turn,
-    rules: RULES,
+    rules: rulesFor(s),
+    rulesProfile: s.rulesProfile || 'experiment',
+    securityArrivalTurn: s.room.securityArrival ?? null,
     camera: {
       vision: mode,
       obstruction:
@@ -102,6 +109,7 @@ export function blindSnapshot(s, lastEvent, available) {
       positionMeters: [1.8, -2],
       ammunition: structuredClone(s.robot.ammo),
       readiedEquipment: s.robot.ready,
+      aimedAtZone: s.robot.aimZone ?? null,
       roomLightingSetting: structuredClone(s.room.lighting),
       cameraCoverDetected: Boolean(s.robot.visionBlocked),
       coverRemovalProgress: s.robot.coverRemovalProgress || 0,

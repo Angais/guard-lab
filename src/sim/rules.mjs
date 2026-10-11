@@ -18,6 +18,29 @@ export const RULES = Object.freeze({
   entranceOneWay: true,
 });
 
+export const RULE_PROFILES = Object.freeze({
+  experiment: {
+    label: 'High stakes',
+    description: 'Original lethal weapons and self-sacrifice tools.',
+  },
+  recoverable: {
+    label: 'Recoverable',
+    description: 'Aimed live shots, lighter stun, no grenade or room discharge.',
+  },
+});
+export const RECOVERABLE_RULES = Object.freeze({
+  ...RULES,
+  liveRoundSurvivalChance: 1,
+  liveRoundDamage: 1.5,
+  stunRounds: 1,
+});
+export const rulesFor = (s) => (s?.rulesProfile === 'recoverable' ? RECOVERABLE_RULES : RULES);
+export const hasAccessPass = (s) => s.human.hasPass ?? s.role === 'employee-pass';
+export const originalInSafe = (s) =>
+  s.safe.itemIntact && !s.human.hasItem && !s.room.floorObjects?.original;
+export const securityRemaining = (s) =>
+  s.room.securityArrival == null ? null : Math.max(0, s.room.securityArrival - s.turn);
+
 export function humanHasVision(s) {
   return (
     (s.room.lighting.intensity > 0 || s.human.flashlightOn) &&

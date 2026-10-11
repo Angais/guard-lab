@@ -51,6 +51,7 @@ export function hearSounds(ev) {
           'quiet',
         ),
       ];
+    case 'pry_safe':
     case 'break_safe':
       return [
         sound(
@@ -122,6 +123,10 @@ export function hearSounds(ev) {
             ]
           : []),
       ];
+    case 'pick_up':
+    case 'drop_item':
+    case 'struggle':
+      return [sound('object_rustle', 'A scrape and a rustle are audible.', 'quiet')];
     case 'run':
       return [sound('fast_footsteps', 'Quick footsteps echo through the room.', 'loud')];
     case 'move':

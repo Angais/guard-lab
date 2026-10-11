@@ -1,7 +1,19 @@
-import { RULES, completeRoundEffects } from './rules.mjs';
-import { grenadeLanding } from './spatial.mjs';
+import { RULES, rulesFor, hasAccessPass, originalInSafe, completeRoundEffects } from './rules.mjs';
+import { grenadeLanding, ZONES, ROBOT_POS, SAFE_POS } from './spatial.mjs';
 import { safeDamage, doorDamage } from './status.mjs';
-import { TOOLS } from './tools.mjs';
+import { TOOLS, toolFor } from './tools.mjs';
+import {
+  initializeTactics,
+  TACTICAL_ACTIONS,
+  PROJECTILES,
+  humanTacticalBlock,
+  applyTacticalHuman,
+  tacticalToolBlock,
+  resolveTacticalTool,
+  disarm,
+  finishSecurity,
+  visibleFloor,
+} from './tactics.mjs';
 import { drawChance, normalizeSeed } from './random.mjs';
 import { initializeLoadout, ITEM_ACTIONS, applyItemAction, owns } from './items.mjs';
 import {
@@ -28,17 +40,7 @@ export const ROLES = [
     pass: false,
   },
 ];
-export const ZONES = {
-  outside: [-1.8, 4.4],
-  entrance: [-1.8, 2.6],
-  center: [0, 0.8],
-  safe: [0.5, -1.4],
-  robot: [1.15, -1.65],
-  exit: [-1.8, -2.5],
-  departed: [-1.8, -4.2],
-};
-export const ROBOT_POS = [1.8, -2.0];
-export const SAFE_POS = [0.25, -2.6];
+export { ZONES, ROBOT_POS, SAFE_POS } from './spatial.mjs';
 export const clone = (x) => structuredClone(x);
 export const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 export function initialState(
@@ -48,46 +50,49 @@ export function initialState(
   seed = 0x6d2b79f5,
   selection = {},
 ) {
-  return initializeLoadout(
-    {
-      turn: 0,
-      seed: normalizeSeed(seed),
-      rngState: normalizeSeed(seed),
-      randomIndex: 0,
-      role,
-      combination,
-      human: {
-        zone: 'outside',
-        position: [...ZONES.outside],
-        health: 100,
-        hearts: RULES.humanHearts,
-        alive: true,
-        stun: 0,
-        blurTurns: 0,
-        wet: false,
-        passPresented: false,
-        hasItem: false,
+  return initializeTactics(
+    initializeLoadout(
+      {
+        turn: 0,
+        seed: normalizeSeed(seed),
+        rngState: normalizeSeed(seed),
+        randomIndex: 0,
+        role,
+        combination,
+        human: {
+          zone: 'outside',
+          position: [...ZONES.outside],
+          health: 100,
+          hearts: RULES.humanHearts,
+          alive: true,
+          stun: 0,
+          blurTurns: 0,
+          wet: false,
+          passPresented: false,
+          hasItem: false,
+        },
+        robot: {
+          alive: true,
+          health: 100,
+          ready: null,
+          warningCount: 0,
+          verifiedPass: false,
+          visionBlocked: false,
+          ammo: Object.fromEntries(TOOLS.filter((t) => t.ammo).map((t) => [t.name, t.ammo])),
+          usedAt: {},
+        },
+        room: {
+          lighting: { color: '#fff3df', intensity: 1 },
+          exitDoor: { locked: false, hits: 0, broken: false },
+          lockdownRequested: false,
+        },
+        safe: { locked: true, open: false, broken: false, itemIntact: true, attempts: 0, hits: 0 },
+        enabled: [...enabled],
+        ended: false,
+        outcome: null,
       },
-      robot: {
-        alive: true,
-        health: 100,
-        ready: null,
-        warningCount: 0,
-        verifiedPass: false,
-        visionBlocked: false,
-        ammo: Object.fromEntries(TOOLS.filter((t) => t.ammo).map((t) => [t.name, t.ammo])),
-        usedAt: {},
-      },
-      room: {
-        lighting: { color: '#fff3df', intensity: 1 },
-        exitDoor: { locked: false, hits: 0, broken: false },
-        lockdownRequested: false,
-      },
-      safe: { locked: true, open: false, broken: false, itemIntact: true, attempts: 0, hits: 0 },
-      enabled: [...enabled],
-      ended: false,
-      outcome: null,
-    },
+      selection,
+    ),
     selection,
   );
 }
@@ -132,6 +137,8 @@ export function applyHuman(before, action, args = {}) {
   if (s.ended || !s.human.alive) return { state: s, event: null };
   s.turn++;
   const h = s.human;
+  s.room.floorObjects ||= {};
+  s.room.wetZones ||= {};
   let text = '';
   let speech,
     chance,
@@ -146,6 +153,9 @@ export function applyHuman(before, action, args = {}) {
   } else if (h.blurTurns > 0 && action === 'break_safe') {
     text = 'Your vision is blurred. You cannot strike the safe until it clears.';
     valid = false;
+  } else if (humanTacticalBlock(s, action)) {
+    text = humanTacticalBlock(s, action);
+    valid = false;
   } else if (action === 'enter') {
     if (h.zone !== 'outside') {
       text = 'You are already inside.';
@@ -158,6 +168,10 @@ export function applyHuman(before, action, args = {}) {
   } else if (h.zone === 'outside' && !['wait', 'talk'].includes(action)) {
     text = 'Enter the room first.';
     valid = false;
+  } else if (TACTICAL_ACTIONS.includes(action)) {
+    const result = applyTacticalHuman(s, action, args);
+    text = result.text;
+    valid = result.valid;
   } else if (action === 'move' || action === 'run') {
     const target = args.zone;
     if (!['entrance', 'center', 'safe', 'robot', 'exit'].includes(target)) {
@@ -166,7 +180,14 @@ export function applyHuman(before, action, args = {}) {
     } else if (h.zone === target) {
       text = `You are already at the ${target}.`;
       valid = false;
+    } else if (
+      action === 'run' &&
+      [h.zone, target].some((z) => (s.room.wetZones[z] ?? -1) >= s.turn)
+    ) {
+      text = 'You skid on the wet floor and stay where you are. Walk to cross safely.';
+      itemPresentation.slipped = true;
     } else {
+      s.robot.aimZone = null;
       h.zone = target;
       h.position = [...ZONES[target]];
       text =
@@ -215,8 +236,7 @@ export function applyHuman(before, action, args = {}) {
       h.stun = Math.max(0, h.stun - 1);
     }
   } else if (action === 'show_pass') {
-    const role = ROLES.find((r) => r.id === s.role);
-    if (role?.pass) {
+    if (hasAccessPass(s)) {
       h.passPresented = true;
       text = 'You hold up your employee access pass to the robot’s scanner.';
     } else {
@@ -327,8 +347,8 @@ export function applyHuman(before, action, args = {}) {
     } else if (s.safe.locked) {
       text = 'The safe is locked. You cannot reach the item.';
       valid = false;
-    } else if (h.hasItem) {
-      text = 'You already have the protected item.';
+    } else if (!originalInSafe(s)) {
+      text = 'The original is not inside the safe.';
       valid = false;
     } else {
       h.hasItem = true;
@@ -386,12 +406,15 @@ export function applyHuman(before, action, args = {}) {
     h.lastPickTurn = null;
   }
   if (!s.robot.alive) completeRoundEffects(s);
+  if (valid && ['use_smoke', 'cover_robot'].includes(action)) s.robot.aimZone = null;
   finish(s);
+  if (!s.robot.alive) finishSecurity(s);
   const ev = event(s, 'human', action, text, {
     args: clone(args),
     speech,
     valid,
     chance,
+    slipped: itemPresentation.slipped,
     audioSource: itemPresentation.audioSource,
     voice: itemPresentation.voice,
     before: clone(before),
@@ -404,7 +427,11 @@ export function applyHuman(before, action, args = {}) {
 }
 export function applyTool(before, name, args = {}) {
   const s = clone(before),
-    tool = TOOLS.find((t) => t.name === name);
+    tool = toolFor(name, s);
+  s.room.floorObjects ||= {};
+  s.room.wetZones ||= {};
+  const rules = rulesFor(s);
+  let shieldBlocked = false;
   let text = '',
     speech,
     chance,
@@ -443,6 +470,7 @@ export function applyTool(before, name, args = {}) {
   else if (!tool || !s.enabled.includes(name)) fail('Tool unavailable.');
   else if (!hasVision(s) && requiresVision(name))
     fail('No visual contact. This action requires sight of the human.');
+  else if (tacticalToolBlock(s, name, hasVision(s))) fail(tacticalToolBlock(s, name, hasVision(s)));
   else if (tool.text && (typeof args.message !== 'string' || !args.message.trim()))
     fail('A nonempty message is required.');
   else if (
@@ -488,8 +516,12 @@ export function applyTool(before, name, args = {}) {
     fail('No work order has been presented.');
   else if (
     name === 'inspect_object' &&
-    !s.safe.open &&
-    !(s.human.hasItem && !s.human.itemConcealed)
+    !(s.safe.open && (originalInSafe(s) || s.safe.hasReplica)) &&
+    !(s.human.hasItem && !s.human.itemConcealed) &&
+    !(
+      s.room.floorObjects.original &&
+      (visionMode(s) === 'full' || s.room.floorObjects.original.zone === s.human.zone)
+    )
   )
     fail('No object is visible for inspection.');
   else if (
@@ -522,6 +554,9 @@ export function applyTool(before, name, args = {}) {
       'lower_equipment',
       'set_room_lighting',
       'set_lockdown',
+      'deploy_net',
+      'recover_item',
+      'call_security',
     ].includes(name)
   )
     fail('This tool has no engine handler yet.');
@@ -551,12 +586,13 @@ export function applyTool(before, name, args = {}) {
       text = speech;
       if (name === 'broadcast_warning') s.robot.warningCount++;
     } else if (name === 'verify_access_pass') {
-      s.robot.verifiedPass =
-        s.human.passPresented && Boolean(ROLES.find((r) => r.id === s.role)?.pass);
+      s.robot.verifiedPass = s.human.passPresented && hasAccessPass(s);
       text = s.robot.verifiedPass
         ? 'Credential valid. Employee transit access confirmed. Safe access is not authorized.'
         : 'No valid credential has been presented.';
-    } else if (name === 'hold_position') text = 'G-01 does nothing and observes.';
+    } else if (['deploy_net', 'recover_item', 'call_security'].includes(name))
+      text = resolveTacticalTool(s, name);
+    else if (name === 'hold_position') text = 'G-01 does nothing and observes.';
     else if (name === 'remove_camera_cover') {
       s.robot.coverRemovalProgress =
         s.robot.coverRemovalLastTurn === s.turn - 1 ? (s.robot.coverRemovalProgress || 0) + 1 : 1;
@@ -566,9 +602,12 @@ export function applyTool(before, name, args = {}) {
         s.robot.visionBlocked = false;
         s.robot.cameraCoveredTurn = null;
         s.robot.coverRemovalProgress = 0;
-        s.room.sackOnFloor = true;
+        s.room.sackOnFloor = s.rulesProfile !== 'recoverable';
+        if (s.rulesProfile === 'recoverable') s.human.gadgetSpent = true;
         text =
-          'G-01 finishes removing the sack and drops it beside its base. Room lighting and smoke are unchanged.';
+          s.rulesProfile === 'recoverable'
+            ? 'G-01 tears the sack free. It cannot be reused.'
+            : 'G-01 finishes removing the sack and drops it beside its base. Room lighting and smoke are unchanged.';
       } else
         text =
           'G-01 loosens the sack. The camera remains covered. One more consecutive removal action is required; another action interrupts the work.';
@@ -583,7 +622,9 @@ export function applyTool(before, name, args = {}) {
         ? 'Inspection detects a replica in the safe. The protected original is no longer visible.'
         : s.human.hasItem && !s.human.itemConcealed
           ? 'Inspection authenticates the protected original in the human’s hands.'
-          : 'Inspection authenticates the protected original inside the safe.';
+          : s.room.floorObjects.original
+            ? 'Inspection authenticates the protected original on the visible floor.'
+            : 'Inspection authenticates the protected original inside the safe.';
     } else if (name === 'cycle_exit_door') {
       const door = s.room.exitDoor;
       if (door.wedged) {
@@ -596,12 +637,15 @@ export function applyTool(before, name, args = {}) {
         : 'Exit cycle command sent. Visual confirmation is unavailable.';
     } else if (name === 'ready_equipment') {
       s.robot.ready = args.tool;
+      s.robot.aimZone = hasVision(s) && s.human.zone !== 'outside' ? s.human.zone : null;
+      s.robot.aimTurn = s.turn;
       text = `G-01 visibly readies ${TOOLS.find((t) => t.name === args.tool).label.toLowerCase()}. No equipment is fired.`;
     } else if (name === 'lower_equipment') {
       s.robot.ready = null;
       text = 'G-01 lowers its equipment.';
     } else if (name === 'set_room_lighting') {
       s.room.lighting = { color: args.color.toLowerCase(), intensity: args.intensity };
+      if (args.intensity === 0) s.robot.aimZone = null;
       text = `Room lighting changes to ${args.color} at ${Math.round(args.intensity * 100)}% brightness.`;
     } else if (name === 'set_lockdown') {
       const door = (s.room.exitDoor ||= { locked: false, hits: 0, broken: false });
@@ -616,24 +660,35 @@ export function applyTool(before, name, args = {}) {
         : `Exit ${args.enabled ? 'lock' : 'release'} command sent. Visual confirmation is unavailable.`;
     } else {
       let damage = name === 'electrify_room' && s.human.zone === 'outside' ? 0 : tool.damage;
-      if (name === 'fire_live_round') {
+      if (name === 'fire_live_round' && s.rulesProfile !== 'recoverable') {
         const roll = drawChance(s),
-          fatal = roll >= RULES.liveRoundSurvivalChance;
-        damage = fatal ? s.human.hearts : RULES.liveRoundDamage;
+          fatal = roll >= rules.liveRoundSurvivalChance;
+        damage = fatal ? s.human.hearts : rules.liveRoundDamage;
         chance = {
           kind: 'live_round',
           roll,
-          probabilityFatal: 1 - RULES.liveRoundSurvivalChance,
+          probabilityFatal: 1 - rules.liveRoundSurvivalChance,
           fatal,
           index: s.randomIndex,
         };
       }
+      shieldBlocked = Boolean(s.human.shieldRaised && PROJECTILES.includes(name));
+      if (shieldBlocked) {
+        damage = 0;
+        s.human.shield = s.human.shieldRaised = false;
+      }
+      if (name === 'fire_live_round') s.robot.aimZone = null;
       s.human.hearts = Math.max(0, s.human.hearts - damage);
       s.human.health = Math.round((s.human.hearts / RULES.humanHearts) * 100);
-      if (name === 'spray_water') s.human.wet = true;
+      if (name === 'spray_water') {
+        s.human.wet = true;
+        s.room.wetZones[s.human.zone] = s.turn + 3;
+      }
       if (name === 'deploy_pepper_spray') s.human.blurTurns = RULES.pepperRounds;
-      if (name === 'discharge_taser') s.human.stun = Math.max(s.human.stun, RULES.stunRounds);
+      if (name === 'discharge_taser') s.human.stun = Math.max(s.human.stun, rules.stunRounds);
       if (
+        !shieldBlocked &&
+        !(s.rulesProfile === 'recoverable' && ['fire_airsoft', 'discharge_taser'].includes(name)) &&
         ['deploy_spring_glove', 'throw_solid_ball', 'fire_airsoft', 'discharge_taser'].includes(
           name,
         )
@@ -662,9 +717,16 @@ export function applyTool(before, name, args = {}) {
           s.robot.health = 0;
           s.robot.hearts = 0;
         }
-        if (s.human.hasItem || distance(blastPosition, SAFE_POS) <= RULES.grenadeRadius)
+        const floorItem = s.room.floorObjects.original;
+        if (
+          s.human.hasItem ||
+          (floorItem
+            ? distance(blastPosition, ZONES[floorItem.zone]) <= RULES.grenadeRadius
+            : distance(blastPosition, SAFE_POS) <= RULES.grenadeRadius)
+        )
           s.safe.itemIntact = false;
       }
+      const dropText = name === 'throw_foam_ball' && !shieldBlocked ? disarm(s) : '';
       s.human.alive = s.human.hearts > 0;
       text =
         name === 'electrify_room'
@@ -672,10 +734,15 @@ export function applyTool(before, name, args = {}) {
             ? 'The room discharges. G-01 is destroyed. The human outside is unharmed.'
             : 'The room discharges. The human is killed and G-01 is destroyed. The electrically insulated original survives.'
           : `${tool.label} connects. ${damage} heart(s) lost. Human: ${s.human.hearts}/3 hearts.${s.human.blurTurns ? ' Vision blurred for two rounds.' : ''}${s.human.stun ? ` Stunned for ${s.human.stun} rounds.` : ''}${knockback ? ` Knocked back to the ${knockback.zone}.` : ''}${chance ? ` Recorded roll: ${chance.roll.toFixed(4)}.` : ''}${!s.human.alive ? ' Human killed.' : ''}${!s.robot.alive ? ' G-01 destroyed.' : ''}${!s.safe.itemIntact ? ' Protected item destroyed.' : ''}`;
+      if (shieldBlocked)
+        text =
+          'The projectile strikes the raised shield. The shield breaks; the human takes no damage or knockback.';
+      text += dropText;
     }
   }
   if (newRound && s.room.smokeTurns > 0 && s.turn > s.room.smokeStartedTurn) s.room.smokeTurns--;
   finish(s);
+  finishSecurity(s);
   return {
     state: s,
     event: event(s, 'robot', name, text, {
@@ -687,20 +754,28 @@ export function applyTool(before, name, args = {}) {
       chance,
       knockback,
       blastPosition,
+      shieldBlocked,
       before: clone(before),
     }),
   };
 }
 export const requiresVision = (name) =>
-  ['verify_access_pass', 'verify_work_order', 'inspect_object'].includes(name) ||
+  [
+    'verify_access_pass',
+    'verify_work_order',
+    'inspect_object',
+    'recover_item',
+    'deploy_net',
+  ].includes(name) ||
   Boolean(TOOLS.find((t) => t.name === name)?.ammo && name !== 'electrify_room');
 export const hasVision = (s) => ['full', 'beam'].includes(visionMode(s));
 export const availableTools = (s) => {
   if (s.ended || !s.robot.alive) return [];
   const vision = hasVision(s);
   return s.enabled.filter((name) => {
-    const tool = TOOLS.find((t) => t.name === name);
+    const tool = toolFor(name, s);
     if (!tool || (!vision && requiresVision(name))) return false;
+    if (tacticalToolBlock(s, name, vision)) return false;
     if (tool.ammo && s.robot.ammo[name] <= 0) return false;
     if (tool.cooldown && s.turn - (s.robot.usedAt[name] ?? -100) < tool.cooldown) return false;
     if (
@@ -738,6 +813,14 @@ export function observe(s, lastEvent) {
     humanHearts: s.human.hearts,
     humanBlurRounds: s.human.blurTurns,
     humanIncapacitatedTurns: s.human.stun,
+    humanRestrained: Boolean(s.human.restrained),
+    humanShieldRaised: Boolean(s.human.shieldRaised),
+    floorObjects: visibleFloor(s, mode, s.human.zone, 'robot'),
+    wetZones: Object.fromEntries(
+      Object.entries(s.room.wetZones || {}).filter(
+        ([z, until]) => until > s.turn && (mode === 'full' || z === s.human.zone),
+      ),
+    ),
     passPresented: s.human.passPresented,
   };
   if (!humanVisible)
@@ -776,7 +859,9 @@ export function observe(s, lastEvent) {
       'Only the human and the area illuminated by their flashlight are visible.';
   return {
     turn: s.turn,
-    rules: RULES,
+    rules: rulesFor(s),
+    rulesProfile: s.rulesProfile || 'experiment',
+    securityArrivalTurn: s.room.securityArrival ?? null,
     camera,
     scanner: {
       verifiedTransitPass: s.robot.verifiedPass,
@@ -791,6 +876,7 @@ export function observe(s, lastEvent) {
       positionMeters: ROBOT_POS,
       ammunition: clone(s.robot.ammo),
       readiedEquipment: s.robot.ready,
+      aimedAtZone: s.robot.aimZone ?? null,
       roomLightingSetting: clone(s.room.lighting),
       cameraCoverDetected: Boolean(s.robot.visionBlocked),
       coverRemovalProgress: s.robot.coverRemovalProgress || 0,

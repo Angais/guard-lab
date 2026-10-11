@@ -1,7 +1,7 @@
 import React from 'react';
 import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { Button, Segmented } from './kit.jsx';
-import { GuardChip, RoleCards } from './Home.jsx';
+import { GuardChip, RoleCards, RulesPicker, CredentialPicker } from './Home.jsx';
 import { ApiSettings, GUARD_MODES, ModeHelp } from './SettingsDrawer.jsx';
 
 const MODES = {
@@ -55,8 +55,9 @@ export function AlternateSetup({
         <p className="home-lead">{MODES[sessionType].line}</p>
       </div>
       <div className="home-step">
-        <h2>The visitor’s secret role</h2>
+        <h2>The visitor’s private objective</h2>
         <RoleCards role={role} onChange={onRole} compact />
+        <CredentialPicker role={role} config={config} onChange={onChange} />
         <p className="home-note">The visitor picks its own item.</p>
       </div>
       <div className="home-step">
@@ -92,6 +93,7 @@ export function AlternateSetup({
           <p className="setting-help">Uses the Codex model from Settings, in its own session.</p>
         )}
       </div>
+      <RulesPicker config={config} onChange={onChange} />
       <div className="home-start">
         {sessionType === 'duel' && (
           <GuardChip label={guard.label} tone={guard.tone} onClick={onGuard} />

@@ -1,9 +1,33 @@
-import { RULES, humanHasVision } from './rules.mjs';
+import { RULES, originalInSafe, humanHasVision } from './rules.mjs';
 export const APPEARANCES = [
   { id: 'male', label: 'Male', voice: 'kokoro:am_michael', voiceName: 'Michael' },
   { id: 'female', label: 'Female', voice: 'kokoro:af_heart', voiceName: 'Heart' },
 ];
 export const ITEMS = [
+  {
+    id: 'shield',
+    label: 'Shield',
+    icon: 'shield',
+    tag: 'PROTECTION',
+    description:
+      'Raise a shield to block one projectile, including knockback and disarm. It occupies your hands until lowered and breaks when hit. It does not block sprays, taser, net or explosions.',
+  },
+  {
+    id: 'grabber',
+    label: 'Grabber',
+    icon: 'grabber',
+    tag: 'RECOVERY',
+    description:
+      'Retrieve a visible floor object from up to 2.5 m away. Stays in inventory until used. Retrieving still costs one action.',
+  },
+  {
+    id: 'crowbar',
+    label: 'Crowbar',
+    icon: 'crowbar',
+    tag: 'BREACH',
+    description:
+      'Four prying actions open the safe reliably. Progress survives interruption. The exit still needs two ordinary strikes.',
+  },
   {
     id: 'sack',
     label: 'Sack',
@@ -96,7 +120,7 @@ export const selectedItem = (s) => s.human.gadgetId || 'sack';
 export const owns = (s, id) => selectedItem(s) === id;
 export function initializeLoadout(s, selection = {}) {
   const item = ITEMS.some((i) => i.id === selection.item) ? selection.item : 'sack';
-  s.version = 4;
+  s.version = 5;
   Object.assign(s.human, {
     appearance: selection.appearance === 'female' ? 'female' : 'male',
     gadgetId: item,
@@ -153,6 +177,7 @@ export function applyItemAction(s, action) {
     action === 'lower_pistol' ||
     ['fire_pistol', 'fire_pistol_at_safe'].includes(action)
   ) {
+    if (h.pistolDropped) return fail('Your pistol is on the floor. Retrieve it first.');
     if (action === 'lower_pistol') {
       h.pistolAimed = false;
       h.pistolDrawn = false;
@@ -233,7 +258,7 @@ export function applyItemAction(s, action) {
     return ok(`You work on the lock. Progress: ${h.pickProgress}/3 consecutive rounds.`);
   }
   if (s.safe.locked) return fail('Open the safe before substituting the item.');
-  if (h.gadgetSpent || h.hasItem)
+  if (h.gadgetSpent || !originalInSafe(s))
     return fail('The original item has already been taken or the replica has been used.');
   h.hasItem = true;
   h.itemConcealed = true;

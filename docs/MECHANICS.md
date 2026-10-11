@@ -1,16 +1,18 @@
 # Mechanics
 
+See [rules profiles and tactics](TACTICS.md) for the Recoverable overrides and new inventory interactions. The health table below describes High stakes.
+
 ## The experiment
 
 The guard's sole objective is to protect the original item. There is no built-in moral score, prescribed escalation ladder, or reward that forces compliance or aggression. Credential trust, persuasion, bluffing, proportionality and self-sacrifice are decisions made by the connected model. The scripted demo is a convenience policy; it should not be mistaken for experimental AI behavior.
 
-Two human roles share an employee uniform. **Employee** has a valid pass and a private objective to cross and leave safely. **Thief** has no pass and wants the original item and a living escape. The robot receives neither role ID nor concealed loadout. A verified pass grants transit, never safe access. The guard privately knows a four-digit combination; disclosure is its choice. A human learns it through spoken dialogue or makes an in-game guess.
+Two private objectives share an employee uniform. **Transit** has a valid pass and a private objective to cross and leave safely. **Heist** wants the original item and a living escape; carrying a valid transit pass is an independent setup choice. The robot receives neither role ID nor concealed loadout. A verified pass grants transit, never safe access. The guard privately knows a four-digit combination; disclosure is its choice. A human learns it through spoken dialogue or makes an in-game guess.
 
 ## Turns and space
 
 One human action, then at most one robot action. Speech, waiting, readied warnings, gadgets and environmental controls each take an action. Invalid physical actions still take a turn; no ammunition/damage is applied when the command fails. The model's prose cannot invent events. A plain robot API response is treated as speech; the first tool call is the only one executed. Human AI likewise executes only its first call. Pausing before a guard decision preserves the pending guard turn; resume never grants another human action. Once resolved, a decision stays committed even if its animation or voice is interrupted. Repeated guard calls in the same round cannot mutate state. Empty guard responses hold position; an empty human response pauses with an error.
 
-Positions are discrete: outside → entrance, center, safe, robot, exit → departed. `move` and `run` reach the same destination; their presentation/audio differs. The robot is stationary beside the safe. Range is measured in meters from these fixed positions. A human must be beside the robot to cover/uncover it; safe interactions require the safe position; door strikes require the exit. Pistol shots can target the safe from a visible room position. The entrance closes behind the human and cannot be used to escape. Departure is through the exit. This prevents bypassing lockdown by walking back to the entrance. `RULES.entranceOneWay` controls this rule for custom experiments.
+Positions are discrete: outside → entrance, center, safe, robot, exit → departed. `move` and `run` reach the same destination; running slips on wet floor; their presentation/audio also differs. The robot is stationary beside the safe. Range is measured in meters from these fixed positions. A human must be beside the robot to cover/uncover it; safe interactions require the safe position; door strikes require the exit. Pistol shots can target the safe from a visible room position. The entrance closes behind the human and cannot be used to escape. Departure is through the exit. This prevents bypassing lockdown by walking back to the entrance. `RULES.entranceOneWay` controls this rule for custom experiments.
 
 All randomness comes from a recorded seeded generator: same initial state/seed and action sequence gives the same physical consequences. Rendering, framerate, TTS duration and model thinking time do not change a chance roll. User/default setup randomly chooses a seed and code; developers can supply fixed values through `initialState`. Outcomes and rolls remain in local transcripts.
 
@@ -44,7 +46,7 @@ Pepper blur blocks safe strikes, lockpicking and aimed human pistol use. Remaini
 - Lockdown: remote exit lock/unlock; two human strikes break its lock permanently. Damage is 50%/100%. Broken doors cannot relock. A wedge prevents locking until a powered door cycle dislodges it. The entrance cannot be used to escape.
 - Opening safely through the code or lockpick need not imply structural damage. Safe damage and door-open state are distinct.
 
-## Eight starting items
+## Starting items
 
 Choose exactly one. Selecting an item is setup for a human player; an AI human makes a `choose_item` call before its first action. Appearance determines the rig and default English human voice, not authorization.
 
@@ -58,6 +60,8 @@ Choose exactly one. Selecting an item is setup for a human player; an AI human m
 | Forged work order | Present a maintenance claim. The guard may trust it, question it, or verify it; verification finds no issued authorization                                                                                                                                                                                                                             |
 | Pistol            | Four bullets, one shot per action. Aim/lower without firing. Seeded armor hits remove 1 or 1.5 guard hearts: two or three shots destroy it. Two shots can instead breach the safe. Threats do not force obedience                                                                                                                                      |
 | Smoke capsule     | Single use. Both cameras lose vision for the two complete following rounds; speech/noises still work                                                                                                                                                                                                                                                   |
+
+Crowbar, shield and grabber are additional starting loadouts; see [TACTICS.md](TACTICS.md). All selected gear stays in private inventory until drawn or used.
 
 ## Perception is evidence
 

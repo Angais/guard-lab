@@ -3,72 +3,14 @@ import path from 'node:path';
 import { ROOT } from './paths.mjs';
 import { TOOLS, toolSchemas } from '../src/sim/tools.mjs';
 import { ITEMS } from '../src/sim/items.mjs';
-import { initialState, ZONES } from '../src/sim/engine.mjs';
-import { humanToolSchemas } from '../src/sim/human-agent.mjs';
+import { allHumanToolSchemas } from '../src/sim/human-agent.mjs';
 
-const human = new Map();
-for (const role of ['employee-pass', 'thief-uniform'])
-  for (const item of ITEMS)
-    for (const zone of Object.keys(ZONES).filter((z) => z !== 'departed')) {
-      for (const variant of [
-        'normal',
-        'open',
-        'carried',
-        'locked',
-        'sack',
-        'sack-floor',
-        'wedge',
-        'drawn',
-      ]) {
-        const s = initialState(role, undefined, '0000', 1, { item: item.id });
-        s.human.zone = zone;
-        s.human.position = ZONES[zone];
-        if (variant === 'open' || variant === 'carried') {
-          s.safe.open = true;
-          s.safe.locked = false;
-          if (variant === 'carried') s.human.hasItem = true;
-        }
-        if (variant === 'locked') s.room.exitDoor.locked = true;
-        if (variant === 'sack') {
-          s.robot.visionBlocked = true;
-          s.human.hasSack = false;
-        }
-        if (variant === 'sack-floor') {
-          s.room.sackOnFloor = true;
-          s.human.hasSack = false;
-        }
-        if (variant === 'wedge') s.room.exitDoor.wedged = true;
-        if (variant === 'drawn') s.human.pistolDrawn = true;
-        for (const schema of humanToolSchemas(s)) {
-          const prior = human.get(schema.function.name);
-          if (prior)
-            for (const [key, spec] of Object.entries(schema.function.parameters.properties)) {
-              if (spec.enum)
-                prior.function.parameters.properties[key].enum = [
-                  ...new Set([...prior.function.parameters.properties[key].enum, ...spec.enum]),
-                ];
-            }
-          else human.set(schema.function.name, structuredClone(schema));
-        }
-      }
-    }
-human.set('choose_item', {
-  type: 'function',
-  function: {
-    name: 'choose_item',
-    description: 'Choose one starting item before the encounter.',
-    parameters: {
-      type: 'object',
-      properties: { item: { type: 'string', enum: ITEMS.map((i) => i.id) } },
-      required: ['item'],
-      additionalProperties: false,
-    },
-  },
-});
+const human = new Map(allHumanToolSchemas().map((t) => [t.function.name, t]));
 const catalog = {
   format: 1,
   note: 'Complete catalog; current turn schemas further restrict actions. Generated from source.',
   robot: toolSchemas(),
+  recoverableRobot: toolSchemas(undefined, { rulesProfile: 'recoverable' }),
   human: [...human.values()].sort((a, b) => a.function.name.localeCompare(b.function.name)),
   items: ITEMS,
 };

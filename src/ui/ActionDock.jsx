@@ -150,7 +150,7 @@ export function ActionDock({
       } else if (event.code === 'KeyM' && dock.canMove) {
         event.preventDefault();
         toggle('map');
-      } else if (panel === 'map' && !off && /^Digit[1-5]$/.test(event.code)) {
+      } else if (panel === 'map' && !off && dock.canMove && /^Digit[1-5]$/.test(event.code)) {
         const zone = ZONE_INFO.find((z) => z.key === event.code.slice(5));
         if (zone && zone.id !== state.human.zone) {
           event.preventDefault();

@@ -16,8 +16,8 @@ test('showcase executes every available tool with successful deterministic outco
 });
 test('showcase readies each device and resets fatalities in separate chapters', () => {
   const record = createShowcase();
-  for (const tool of TOOLS.filter(
-    (t) => t.ammo && !['throw_foam_ball', 'throw_solid_ball'].includes(t.name),
+  for (const tool of TOOLS.filter((t) =>
+    TOOLS.find((x) => x.name === 'ready_equipment').parameters.tool.enum.includes(t.name),
   ))
     assert.ok(
       record.events.some((e) => e.action === 'ready_equipment' && e.args.tool === tool.name),

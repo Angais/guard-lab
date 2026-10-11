@@ -27,6 +27,15 @@ export function orientSegment(mesh, start, end) {
   mesh.quaternion.setFromUnitVectors(Y, end.clone().sub(start).normalize());
 }
 export const ACTION_DURATION = {
+  pick_up: 1000,
+  drop_item: 1000,
+  recover_item: 1400,
+  raise_shield: 800,
+  lower_shield: 700,
+  deploy_net: 1600,
+  struggle: 1100,
+  pry_safe: 1400,
+  call_security: 1100,
   ready_equipment: 1100,
   lower_equipment: 850,
   hold_position: 650,

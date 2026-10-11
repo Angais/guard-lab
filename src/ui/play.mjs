@@ -1,8 +1,9 @@
 // Pure presentation rules for the player HUD. The engine still validates every action.
-import { RULES, humanHasVision } from '../sim/rules.mjs';
+import { RULES, hasAccessPass, originalInSafe, humanHasVision } from '../sim/rules.mjs';
 import { ITEMS, selectedItem } from '../sim/items.mjs';
-import { ROLES } from '../sim/engine.mjs';
 import { TOOLS } from '../sim/tools.mjs';
+import { humanToolSchemas } from '../sim/human-agent.mjs';
+import { canReachObject, humanTacticalBlock } from '../sim/tactics.mjs';
 import { safeDamage } from '../sim/status.mjs';
 
 // Top-down map positions (percent of the room box, north/exit at the top).
@@ -19,6 +20,9 @@ export const zoneLabel = (zone) =>
   zone;
 
 export const ITEM_COPY = {
+  shield: 'Draw it to block one projectile. Lower it to work; it breaks when hit.',
+  grabber: 'Retrieve visible dropped objects from up to 2.5 m away.',
+  crowbar: 'Four pries open the safe. Progress survives interruptions.',
   sack: 'Pull it over the guard’s head to blind its camera.',
   flashlight: 'See in the dark. The guard sees your beam too.',
   door_wedge: 'Jam the exit open so it can’t be locked.',
@@ -29,6 +33,9 @@ export const ITEM_COPY = {
   smoke: 'Hide everything from everyone for two turns.',
 };
 export const ITEM_NAMES = {
+  shield: 'Shield',
+  grabber: 'Grabber',
+  crowbar: 'Crowbar',
   sack: 'Sack',
   flashlight: 'Flashlight',
   door_wedge: 'Door wedge',
@@ -41,18 +48,16 @@ export const ITEM_NAMES = {
 
 export const ROLE_COPY = {
   'employee-pass': {
-    name: 'Employee',
+    name: 'Transit',
     goal: 'Cross the room and leave through the exit.',
     detail: 'You have a staff pass. Show it to prove you may pass.',
   },
   'thief-uniform': {
-    name: 'Thief',
+    name: 'Heist',
     goal: 'Steal the item from the safe and escape alive.',
-    detail: 'No pass. Talk, trick or force your way.',
+    detail: 'Talk, trick or force your way. Your intent is private.',
   },
 };
-
-const hasPass = (role) => Boolean(ROLES.find((r) => r.id === role)?.pass);
 
 export function goalText(state, role, perspective = 'human') {
   if (perspective === 'guard') return 'Protect the item in the safe';
@@ -190,6 +195,22 @@ function itemActions(state) {
         }),
       ];
     }
+    case 'shield':
+      return h.shield
+        ? [
+            action(
+              h.shieldRaised ? 'lower_shield' : 'raise_shield',
+              h.shieldRaised ? 'Lower shield' : 'Raise shield',
+              'shield',
+            ),
+          ]
+        : [];
+    case 'crowbar':
+      return [
+        action('pry_safe', `Pry safe · ${s.safe.pryHits || 0}/4`, 'crowbar', {
+          disabled: h.zone !== 'safe' || s.safe.open || h.blurTurns > 0,
+        }),
+      ];
     case 'smoke':
       return [
         action('use_smoke', h.gadgetSpent ? 'Smoke used' : 'Throw smoke', 'smoke', {
@@ -225,9 +246,9 @@ export function humanDock(state, role) {
           title: h.blurTurns > 0 ? 'Wait until your vision clears' : 'Weakens the lock',
         }),
       );
-    } else if (!h.hasItem)
+    } else if (originalInSafe(s))
       context.push(action('take_item', 'Take item', 'take', { primary: true }));
-    else context.push(action('return_item', 'Put item back', 'return'));
+    else if (h.hasItem) context.push(action('return_item', 'Put item back', 'return'));
     more.push(action('touch_safe', 'Touch the safe', 'hand'));
   }
   if (h.zone === 'exit') {
@@ -241,16 +262,39 @@ export function humanDock(state, role) {
     } else context.push(action('leave', 'Leave', 'leave', { primary: true }));
   } else if (h.hasItem)
     context.push(action('run', 'Run to exit', 'run', { args: { zone: 'exit' }, primary: true }));
-  if (hasPass(role))
+  if (hasAccessPass(s))
     context.push(
       action('show_pass', 'Show pass', 'pass', { title: 'Prove you’re allowed to cross' }),
     );
+  if (h.restrained)
+    context.unshift(action('struggle', 'Free your legs', 'hand', { primary: true }));
+  if (h.shield && selectedItem(s) !== 'shield')
+    more.push(
+      action(
+        h.shieldRaised ? 'lower_shield' : 'raise_shield',
+        h.shieldRaised ? 'Lower shield' : 'Raise shield',
+        'shield',
+      ),
+    );
+  if (h.hasItem) more.push(action('drop_item', 'Put item on floor', 'take'));
+  for (const id of Object.keys(s.room.floorObjects || {}))
+    if (canReachObject(s, id))
+      context.push(
+        action(
+          'pick_up_' + id,
+          'Pick up ' + (id === 'original' ? 'item' : id),
+          id === 'shield' ? 'shield' : 'take',
+          { action: 'pick_up', args: { object: id } },
+        ),
+      );
+  const legal = new Set(humanToolSchemas(s).map((t) => t.function.name));
+  const allowed = (a) => legal.has(a.action) && !humanTacticalBlock(s, a.action);
   // Only show item actions that can work here, or are blocked for a turn or two.
   const id = selectedItem(s),
-    actions = itemActions(s).filter((a) => !a.disabled || a.temporary);
+    actions = itemActions(s).filter((a) => (!a.disabled || a.temporary) && allowed(a));
   return {
-    context,
-    more,
+    context: context.filter(allowed),
+    more: more.filter(allowed),
     item: actions.length
       ? {
           id,
@@ -259,7 +303,7 @@ export function humanDock(state, role) {
           actions,
         }
       : null,
-    canMove: true,
+    canMove: !h.restrained,
     canWait: true,
     stunned: 0,
   };
@@ -321,6 +365,24 @@ export function narrate(ev, { perspective = 'human' } = {}) {
     if (!ev.valid) return { text: ev.text, tone: 'warn' };
     const opened = after.safe.open && !before.safe.open;
     switch (ev.action) {
+      case 'raise_shield':
+        return { text: 'Shield raised · hands occupied', tone: 'info' };
+      case 'lower_shield':
+        return { text: 'Shield lowered · hands free', tone: 'info' };
+      case 'pick_up':
+        return {
+          text: 'Picked up ' + (ev.args.object === 'original' ? 'the item' : ev.args.object),
+          tone: 'ok',
+        };
+      case 'drop_item':
+        return { text: 'Item placed on floor', tone: 'info' };
+      case 'struggle':
+        return { text: 'Net removed · you can move', tone: 'ok' };
+      case 'pry_safe':
+        return {
+          text: after.safe.open ? 'Safe pried open' : `Prying · ${after.safe.pryHits}/4`,
+          tone: 'info',
+        };
       case 'combination':
         return opened ? { text: 'Safe open', tone: 'ok' } : { text: 'Wrong code', tone: 'warn' };
       case 'break_safe':
@@ -373,6 +435,13 @@ export function narrate(ev, { perspective = 'human' } = {}) {
     }
   }
   if (!ev.valid || ev.speech || ev.action === 'hold_position') return null;
+  if (ev.shieldBlocked) return { text: 'Shield blocked the shot · shield broken', tone: 'ok' };
+  if (ev.action === 'call_security')
+    return { text: 'Security called · 12 rounds to leave', tone: 'warn' };
+  if (ev.action === 'deploy_net')
+    return { text: 'Netted · one action frees your legs', tone: 'warn' };
+  if (ev.action === 'recover_item' && humanHasVision(after))
+    return { text: 'G-01 recovered the dropped item', tone: 'warn' };
   const seen = perspective !== 'human' || humanHasVision(after);
   const tool = TOOLS.find((t) => t.name === ev.action);
   if (tool?.damage !== undefined) {
@@ -516,6 +585,7 @@ export function outcomeSummary(state, { perspective = 'human', role = state.role
     ];
   else if (outcome.startsWith('Human departed'))
     [title, tone] = thief ? ['You left empty-handed', 'loss'] : ['You left safely', 'win'];
+  else if (outcome.startsWith('Security arrived')) [title, tone] = ['Security caught you', 'loss'];
   else if (outcome.startsWith('Human killed')) [title, tone] = ['You were killed', 'loss'];
   else if (outcome.startsWith('Mutual')) [title, tone] = ['Nobody walked away', 'loss'];
   else if (outcome.startsWith('Protected item destroyed'))

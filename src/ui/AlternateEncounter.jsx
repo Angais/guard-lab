@@ -16,7 +16,7 @@ import {
   ArrowDownToLine,
 } from 'lucide-react';
 import { Room } from '../scene/Chamber.jsx';
-import { TOOLS, toolSchemas } from '../sim/tools.mjs';
+import { TOOLS, toolFor, toolSchemas } from '../sim/tools.mjs';
 import {
   initialState,
   applyTool,
@@ -92,8 +92,8 @@ export default function AlternateEncounter({
   const room = useRef(),
     store = useRef({
       state: initial,
-      humanMessages: humanMessages(role),
-      robotMessages: createMessages(config.prompt, initial.combination),
+      humanMessages: humanMessages(role, initial),
+      robotMessages: createMessages(config.prompt, initial.combination, initial),
       phase: 'human',
       lastRobotEvent: null,
       initial,
@@ -130,7 +130,7 @@ export default function AlternateEncounter({
         data,
         sessionId,
         actor,
-        allTools: actor === 'human' ? allHumanToolSchemas() : toolSchemas(config.enabled),
+        allTools: actor === 'human' ? allHumanToolSchemas() : toolSchemas(initial.enabled, initial),
         codexSettings: codexSettings(),
         modelConfig:
           actor === 'human'
@@ -235,6 +235,7 @@ export default function AlternateEncounter({
         setStatus('choosing');
         const item = await chooseHumanLoadout({
           role,
+          state: initial,
           request: (data) => request(data, 'human'),
           mode: humanMode,
           signal: controller.signal,
@@ -349,7 +350,7 @@ export default function AlternateEncounter({
         sessionId,
         actor: 'robot',
         system: store.current.robotMessages[0].content,
-        allTools: toolSchemas(config.enabled),
+        allTools: toolSchemas(initial.enabled, initial),
         settings: codexSettings(),
       });
     drive();
@@ -442,12 +443,15 @@ export default function AlternateEncounter({
     },
   ];
   const groups = {
-    devices: TOOLS.filter((t) => t.ammo),
+    devices: TOOLS.filter((t) => t.ammo && state.enabled.includes(t.name)).map((t) =>
+      toolFor(t.name, state),
+    ),
     ready: tool('ready_equipment').parameters.tool.enum.map(tool),
     observe: [
       'verify_access_pass',
       'verify_work_order',
       'inspect_object',
+      'recover_item',
       'remove_camera_cover',
     ].map(tool),
   };
@@ -499,6 +503,15 @@ export default function AlternateEncounter({
         </div>
         <StatusChips
           chips={[
+            state.room.securityArrival != null && {
+              text: `Security · ${Math.max(0, state.room.securityArrival - state.turn)} rounds`,
+              tone: 'danger',
+            },
+            !blind &&
+              state.human.restrained && {
+                text: 'Visitor netted · 1 action to escape',
+                tone: 'warn',
+              },
             !blind &&
               safeChip(state) && {
                 text: safeChip(state),
@@ -604,6 +617,14 @@ export default function AlternateEncounter({
             )}
             {panel === 'room' && (
               <Popover className="dock-popover menu-popover" label="Room controls">
+                {state.rulesProfile === 'recoverable' && (
+                  <Button
+                    disabled={disabled(tool('call_security'))}
+                    onClick={() => act('call_security')}
+                  >
+                    Call security · 12 rounds
+                  </Button>
+                )}
                 <Button
                   disabled={blocked || !state.enabled.includes('set_lockdown')}
                   onClick={() => act('set_lockdown', { enabled: !state.room.lockdownRequested })}

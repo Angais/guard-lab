@@ -179,7 +179,9 @@ test('the dock follows the room: outside, stunned, safe and exit each offer the 
     humanDock(safe, 'thief-uniform').context.map((a) => a.action),
     ['combination', 'break_safe'],
   );
+  safe.human.hasPass = true;
   assert.ok(humanDock(safe, 'employee-pass').context.some((a) => a.action === 'show_pass'));
+  safe.human.hasPass = false;
   assert.ok(!humanDock(safe, 'thief-uniform').context.some((a) => a.action === 'show_pass'));
   const exit = applyHuman(applyHuman(outside, 'enter').state, 'move', { zone: 'exit' }).state;
   assert.equal(humanDock(exit, 'thief-uniform').context.find((a) => a.primary).action, 'leave');

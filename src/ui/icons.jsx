@@ -1,4 +1,6 @@
 import {
+  Shield,
+  Wrench,
   BadgeCheck,
   Cloud,
   Crosshair,
@@ -19,6 +21,9 @@ import {
 } from 'lucide-react';
 
 export const ITEM_ICONS = {
+  crowbar: Wrench,
+  shield: Shield,
+  grabber: Hand,
   sack: ShoppingBag,
   light: Flashlight,
   wedge: DoorOpen,

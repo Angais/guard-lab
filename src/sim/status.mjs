@@ -8,6 +8,7 @@ export const safeDamage = (s) =>
         95,
         Math.max(
           ((s.safe.hits || 0) / (RULES.safeWeakeningHits + 1)) * 100,
+          ((s.safe.pryHits || 0) / 4) * 100,
           ((s.safe.pistolHits || 0) / RULES.safeBulletHits) * 100,
         ),
       );

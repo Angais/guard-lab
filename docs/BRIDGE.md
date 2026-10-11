@@ -40,7 +40,7 @@ node scripts/robot-link.mjs listen
 | `id`                   | Unique request ID; echo exactly once when responding                            |
 | `actor`                | `robot` or `human`                                                              |
 | `instructions`         | This actor's system instructions and objective                                  |
-| `observation`          | Latest allowed sensors; human loadout phase includes the eight items            |
+| `observation`          | Latest allowed sensors; human loadout phase includes the current item catalogue |
 | `recentHistory`        | Up to 12 recent dialogue/action/result messages; retain your own earlier memory |
 | `tools`                | Exact function schemas for this turn, including required arguments              |
 | `hasCombinationMemory` | Guard has an opaque private memory reference                                    |

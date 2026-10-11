@@ -1,5 +1,6 @@
 import React from 'react';
 import { ArrowRight, BadgeCheck, Check, ChevronRight, Cpu, VenetianMask } from 'lucide-react';
+import { RULE_PROFILES } from '../sim/rules.mjs';
 import { ITEMS } from '../sim/items.mjs';
 import { ITEM_COPY, ITEM_NAMES, ROLE_COPY } from './play.mjs';
 import { ITEM_ICONS } from './icons.jsx';
@@ -44,6 +45,33 @@ export function RoleCards({ role, onChange, compact }) {
   );
 }
 
+export function RulesPicker({ config, onChange }) {
+  return (
+    <div className="home-step">
+      <Segmented
+        label="Rules"
+        value={config.rulesProfile || 'recoverable'}
+        onChange={(rulesProfile) => onChange({ rulesProfile })}
+        options={Object.entries(RULE_PROFILES).map(([value, p]) => ({ value, label: p.label }))}
+      />
+      <p className="home-note">{RULE_PROFILES[config.rulesProfile || 'recoverable'].description}</p>
+    </div>
+  );
+}
+
+export function CredentialPicker({ role, config, onChange }) {
+  return role === 'thief-uniform' ? (
+    <label className="home-note credential-choice">
+      <input
+        type="checkbox"
+        checked={Boolean(config.credential)}
+        onChange={(e) => onChange({ credential: e.target.checked })}
+      />{' '}
+      Carry a valid transit pass · your goal stays private
+    </label>
+  ) : null;
+}
+
 export function GuardChip({ label, tone, onClick, prefix = 'Guard' }) {
   return (
     <button type="button" className="guard-chip" onClick={onClick} title="Change in Settings">
@@ -72,7 +100,7 @@ export function Home({
     <section className="home-panel" aria-label="New game">
       <div className="home-step">
         <div className="step-head">
-          <h2>Who are you?</h2>
+          <h2>Your private objective</h2>
           <Segmented
             size="sm"
             label="Appearance"
@@ -85,6 +113,7 @@ export function Home({
           />
         </div>
         <RoleCards role={role} onChange={onRole} />
+        <CredentialPicker role={role} config={config} onChange={onConfig} />
         <p className="home-note">The guard can’t see your role. It decides what to believe.</p>
       </div>
       <div className="home-step">
@@ -113,6 +142,7 @@ export function Home({
           {ITEM_COPY[chosen.id]}
         </p>
       </div>
+      <RulesPicker config={config} onChange={onConfig} />
       <div className="home-start">
         <GuardChip label={guard.label} tone={guard.tone} onClick={onGuard} />
         <Button
