@@ -1457,7 +1457,7 @@ code {
   font-variant-numeric: tabular-nums;
 }
 .subtitle-speaker {
-  margin-right: 10px;
+  margin-right: 8px;
   font-family: var(--font-head);
   font-weight: 600;
   color: var(--text-2);

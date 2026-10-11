@@ -42,7 +42,7 @@ export function Subtitles({ line, callout, voiced = false }) {
         >
           <span className="subtitle-body">
             <span className="subtitle-speaker">
-              {line.who === 'robot' ? 'G-01' : line.name || 'You'}
+              {line.who === 'robot' ? 'G-01' : line.name || 'You'}:
             </span>
             <span className="subtitle-text">{pages[page] ?? text}</span>
           </span>
