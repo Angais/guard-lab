@@ -20,6 +20,9 @@ export const DEFAULT_VOICE = Object.freeze({
   humanVoice: '',
   input: true,
   pushToTalkKey: 'Space',
+  // Typed lines are read aloud in your voice; push-to-talk lines are never replayed.
+  readOwnLines: true,
+  subtitles: true,
 });
 export const PUSH_TO_TALK_KEYS = [
   { code: 'Space', label: 'Space' },

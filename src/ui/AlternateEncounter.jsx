@@ -674,7 +674,11 @@ export default function AlternateEncounter({
         </div>
       )}
       <div className="hud-bottom">
-        <Subtitles line={line} callout={callout} voiced={audio && voiceConfig.speech} />
+        <Subtitles
+          line={voiceConfig.subtitles === false ? null : line}
+          callout={callout}
+          voiced={audio && voiceConfig.speech}
+        />
         {!state.ended && (
           <TurnState
             phase={turnPhase}

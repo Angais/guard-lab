@@ -435,9 +435,21 @@ export function SettingsDrawer({
           <h3>Voices</h3>
           <Toggle
             label="Spoken voices"
-            description="Read the other side’s lines aloud. Subtitles always show. Voices are AI-generated."
+            description="Read lines aloud. Voices are AI-generated."
             checked={config.voice.speech}
             onChange={(speech) => updateVoice({ speech })}
+          />
+          <Toggle
+            label="Read my typed lines aloud"
+            description="Your typed lines play in your character’s voice. Push-to-talk is never replayed."
+            checked={config.voice.readOwnLines !== false}
+            onChange={(readOwnLines) => updateVoice({ readOwnLines })}
+          />
+          <Toggle
+            label="Subtitles"
+            description="Show spoken lines on screen."
+            checked={config.voice.subtitles !== false}
+            onChange={(subtitles) => updateVoice({ subtitles })}
           />
           <div className="field-pair">
             <VoiceSelect

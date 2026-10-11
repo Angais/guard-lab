@@ -366,8 +366,13 @@ export default function App() {
   }
   async function speakEvent(ev, prepared) {
     if (!ev?.speech) return;
-    // The player's own lines are shown as subtitles, never read back to them in a synthetic voice.
-    if (ev.kind === 'human' && !replayRef.current) return;
+    // Typed lines can be read in the player's voice (Settings → Voice); spoken ones never echo.
+    if (
+      ev.kind === 'human' &&
+      !replayRef.current &&
+      configRef.current.voice?.readOwnLines === false
+    )
+      return;
     try {
       await speaker.speak(ev, prepared, { onStart: () => speechStarted(ev) });
     } catch (error) {
@@ -1254,7 +1259,9 @@ export default function App() {
             />
           </header>
           <div className="hud-bottom">
-            {!(ended && !isReplay) && <Subtitles line={line} callout={callout} />}
+            {!(ended && !isReplay) && (
+              <Subtitles line={config.voice?.subtitles === false ? null : line} callout={callout} />
+            )}
             {isReplay ? (
               <ReplayBar
                 index={replayIndex}
