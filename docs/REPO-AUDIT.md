@@ -1,5 +1,7 @@
 # Public repository audit
 
+This audit describes the public 1.0.x release and the checks run for it; its test counts and platform results are from that time. Later changes, including the current Node.js 22.12+ requirement, are in the [changelog](../CHANGELOG.md), and [RELEASE.md](RELEASE.md) describes today's package checks.
+
 This review began with a fresh clone of the public repository and fresh downloads of its source ZIP, Windows executable and checksums. It inspected the published content, not only the development folder.
 
 | Area                       | Assessment                                                                                                                                                                                                                                                                     | Practical boundary                                                                                                                                                                                           |

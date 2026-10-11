@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { APPEARANCES } from '../sim/items.mjs';
+import { resolveVoice } from '../../shared/voice-catalog.mjs';
+import { playSound } from '../audio/sfx.mjs';
+import { MAX_RECORDING_SECONDS } from '../audio/push-to-talk.mjs';
 import { makeRecorder, makeVoicePlayer } from './audio-bridge.mjs';
 
 const desktop = () => globalThis.window?.desktop;
@@ -139,11 +142,15 @@ export function useVoice() {
 }
 
 // Records one utterance and returns its transcript. Shared by push-to-talk and mic tests.
+// `phase` is 'idle' | 'listening' | 'transcribing'. While listening, `live` turns true once the
+// microphone is actually recording (opening it can take most of a second); a soft blip marks it.
 export function useVoiceCapture({ onText, onError } = {}) {
   const [phase, setPhase] = useState('idle');
+  const [live, setLive] = useState(false);
   const [level, setLevel] = useState(0);
   const recorder = useRef(null),
     starting = useRef(null),
+    ending = useRef(false),
     session = useRef(0),
     meter = useRef(0),
     handlers = useRef({});
@@ -151,9 +158,11 @@ export function useVoiceCapture({ onText, onError } = {}) {
   const stopMeter = () => {
     cancelAnimationFrame(meter.current);
     setLevel(0);
+    setLive(false);
   };
   const cancel = useCallback(() => {
     session.current++;
+    ending.current = false;
     stopMeter();
     try {
       recorder.current?.cancel();
@@ -162,14 +171,29 @@ export function useVoiceCapture({ onText, onError } = {}) {
   }, []);
   const begin = useCallback(async () => {
     const token = ++session.current;
+    ending.current = false;
     setPhase('listening');
+    setLive(false);
     try {
       recorder.current ||= makeRecorder();
       if (!recorder.current) throw new Error('Voice input is unavailable in this build.');
       starting.current = recorder.current.start();
       await starting.current;
-      if (token !== session.current) return;
+      if (token !== session.current || ending.current) return;
+      setLive(true);
+      playSound('mic-ready');
       const tick = () => {
+        if (recorder.current?.full) {
+          // At the length limit: send what was said rather than silently dropping the rest.
+          handlers.current.onError?.(
+            Object.assign(
+              new Error(`Voice input stops at ${MAX_RECORDING_SECONDS} seconds. Sending it now.`),
+              { notice: true },
+            ),
+          );
+          end();
+          return;
+        }
         setLevel(Math.max(0, Math.min(1, recorder.current?.level?.() || 0)));
         meter.current = requestAnimationFrame(tick);
       };
@@ -183,8 +207,11 @@ export function useVoiceCapture({ onText, onError } = {}) {
     }
   }, []);
   const end = useCallback(async () => {
+    // Already sending (for example after the length limit); the key release changes nothing.
+    if (ending.current) return;
     const token = session.current;
     if (!recorder.current || !starting.current) return cancel();
+    ending.current = true;
     stopMeter();
     setPhase('transcribing');
     try {
@@ -211,7 +238,10 @@ export function useVoiceCapture({ onText, onError } = {}) {
       setPhase('idle');
       handlers.current.onError?.(error);
     } finally {
-      if (token === session.current) starting.current = null;
+      if (token === session.current) {
+        starting.current = null;
+        ending.current = false;
+      }
     }
   }, []);
   useEffect(
@@ -224,7 +254,32 @@ export function useVoiceCapture({ onText, onError } = {}) {
     },
     [],
   );
-  return { phase, level, begin, end, cancel };
+  return { phase, live, level, begin, end, cancel };
+}
+
+// Lines the player has just said into the microphone: shown as subtitles, but not voiced again
+// (the player already heard themselves say them). Keyed by actor and text; entries expire, and
+// the player's own line uses its entry up, so the other side may still say the same words.
+const SPOKEN_MS = 120000;
+const spoken = new Map();
+const spokenKey = (actor, text) =>
+  actor +
+  '|' +
+  String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+function rememberSpoken(actor, text) {
+  const now = Date.now();
+  for (const [key, at] of spoken) if (now - at > SPOKEN_MS || spoken.size > 16) spoken.delete(key);
+  spoken.set(spokenKey(actor, text), now);
+}
+function saidAloud(ev, consume = false) {
+  const key = spokenKey(ev.kind === 'robot' ? 'robot' : 'human', ev.speech),
+    at = spoken.get(key);
+  if (!at || Date.now() - at > SPOKEN_MS) return false;
+  if (consume) spoken.delete(key);
+  return true;
 }
 
 export const isTyping = (element) =>
@@ -233,9 +288,30 @@ export const isTyping = (element) =>
     (element.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)),
   );
 
-// Hold a key to talk; release to transcribe and send. Esc cancels.
-export function usePushToTalk({ enabled, code = 'Space', ready, onText, onUnavailable, onError }) {
-  const capture = useVoiceCapture({ onText, onError });
+// The talk pill's phase: 'starting' while the key is held but the microphone is not yet recording,
+// so "Listening…" only appears once speech is actually captured.
+export const talkPhase = ({ phase, live } = {}) =>
+  phase === 'listening' && !live ? 'starting' : phase || 'idle';
+
+// Hold a key to talk; release to transcribe and send. Esc cancels. `actor` is the side the player
+// speaks for ('human', or 'robot' when playing the guard); its echo of the line is not voiced.
+// `phase` is 'idle' | 'starting' | 'listening' | 'transcribing' (see talkPhase).
+export function usePushToTalk({
+  enabled,
+  code = 'Space',
+  ready,
+  actor = 'human',
+  onText,
+  onUnavailable,
+  onError,
+}) {
+  const capture = useVoiceCapture({
+    onText: (text) => {
+      rememberSpoken(actor, text);
+      onText?.(text);
+    },
+    onError,
+  });
   const held = useRef(false),
     state = useRef({});
   state.current = { ready, onUnavailable, capture };
@@ -289,7 +365,7 @@ export function usePushToTalk({ enabled, code = 'Space', ready, onText, onUnavai
       abandon();
     };
   }, [enabled, code]);
-  return capture;
+  return { ...capture, phase: talkPhase(capture) };
 }
 
 export function useVoicePlayer() {
@@ -303,24 +379,37 @@ export const appearanceVoice = (appearance) =>
 
 // Chooses each event's voice: recordings carry their own; the human follows appearance.
 export function voiceForEvent(ev, voiceConfig = {}, fallbackAppearance = 'male') {
-  if (ev?.voice && ev.voice.startsWith('kokoro:')) return ev.voice;
+  // A recording made with Kokoro (earlier releases) plays with the Supertonic default of its gender.
+  if (ev?.voice && /^(?:supertonic|kokoro):/.test(ev.voice))
+    return resolveVoice(ev.voice, ev.kind === 'robot' ? 'robot' : 'human');
   if (ev?.kind === 'robot') return voiceConfig.guardVoice;
   return (
     voiceConfig.humanVoice || appearanceVoice(ev?.state?.human?.appearance || fallbackAppearance)
   );
 }
 
-// Plays event speech with pre-synthesis, cancellation and a speaking indicator.
+// How an event's line is played: broadcast warnings start after their chime (about 0.35 s) and
+// sound like the room's loudspeaker.
+export function speechStyle(ev) {
+  return ev?.kind === 'robot' && ev.action === 'broadcast_warning'
+    ? { treatment: 'pa', leadMs: 380 }
+    : { treatment: null, leadMs: 0 };
+}
+
+// Plays event speech with pre-synthesis, cancellation and a speaking indicator. `speaking` is
+// the actor whose voice is audible now: it is set when the audio starts, not while synthesizing.
 export function useSpeaker({ enabled, voiceConfig, appearance }) {
   const player = useVoicePlayer();
   const [speaking, setSpeaking] = useState(null);
   const cache = useRef(new Map()),
     generation = useRef(0),
+    calls = useRef(0),
+    audible = useRef(0),
     settings = useRef({});
   settings.current = { enabled, voiceConfig, appearance };
   const prepare = useCallback((ev) => {
     const { enabled, voiceConfig, appearance } = settings.current;
-    if (!enabled || !ev?.speech) return null;
+    if (!enabled || !ev?.speech || saidAloud(ev)) return null;
     const voice = voiceForEvent(ev, voiceConfig, appearance),
       actor = ev.kind === 'robot' ? 'robot' : 'human',
       key = `${actor}|${voice}|${ev.speech}`;
@@ -333,20 +422,40 @@ export function useSpeaker({ enabled, voiceConfig, appearance }) {
     return cache.current.get(key);
   }, []);
   const speak = useCallback(async (ev, prepared, { onStart } = {}) => {
-    if (!settings.current.enabled || !ev?.speech) return;
-    const token = generation.current;
-    const actor = ev.kind === 'robot' ? 'robot' : 'human';
-    setSpeaking(actor);
+    if (!settings.current.enabled || !ev?.speech || saidAloud(ev, true)) return;
+    const token = generation.current,
+      call = ++calls.current,
+      begun = performance.now();
+    const actor = ev.kind === 'robot' ? 'robot' : 'human',
+      { treatment, leadMs } = speechStyle(ev);
+    const current = () => token === generation.current && settings.current.enabled;
     try {
       const ready = await (prepared || prepare(ev));
-      if (token !== generation.current || !settings.current.enabled || !ready) return;
-      await player.play(ready, { onStart });
+      if (!current() || !ready) return;
+      const lead = leadMs - (performance.now() - begun);
+      if (lead > 0) await new Promise((resolve) => setTimeout(resolve, lead));
+      if (!current()) return;
+      await player.play(ready, {
+        treatment,
+        onStart: () => {
+          if (current()) {
+            audible.current = call;
+            setSpeaking(actor);
+          }
+          onStart?.();
+        },
+      });
     } finally {
-      if (token === generation.current) setSpeaking(null);
+      // Only this line's indicator: a newer line may already be audible.
+      if (audible.current === call) {
+        audible.current = 0;
+        setSpeaking(null);
+      }
     }
   }, []);
   const stop = useCallback(() => {
     generation.current++;
+    audible.current = 0;
     try {
       player.stop();
     } catch {}

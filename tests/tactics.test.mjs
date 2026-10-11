@@ -14,7 +14,7 @@ import {
   allHumanToolSchemas,
 } from '../src/sim/human-agent.mjs';
 import { toolSchemas } from '../src/sim/tools.mjs';
-import { originalInSafe } from '../src/sim/rules.mjs';
+import { originalInSafe, RULES } from '../src/sim/rules.mjs';
 import { humanDock } from '../src/ui/play.mjs';
 import { defaultConfig, migrateConfig } from '../src/ui/config.mjs';
 import { createMessages } from '../src/sim/agent.mjs';
@@ -55,7 +55,7 @@ test('the shared rules allow live fire without mandatory readying and preserve l
   assert.equal(shot.event.valid, true);
   assert.equal(shot.event.chance.kind, 'live_round');
   assert.ok(Math.abs(shot.event.chance.probabilityFatal - 0.67) < 1e-9);
-  assert.equal(shot.state.human.hearts, shot.event.chance.fatal ? 0 : 0.5);
+  assert.equal(shot.state.human.hearts, shot.event.chance.fatal ? 0 : 1.5);
 });
 
 test('legacy softer selection cannot hide lethal tools or override physical consequences', () => {
@@ -73,9 +73,13 @@ test('legacy softer selection cannot hide lethal tools or override physical cons
   assert.match(
     toolSchemas(undefined, s).find((t) => t.function.name === 'discharge_taser').function
       .description,
-    /two hearts/,
+    /0\.5 hearts/,
   );
-  const end = applyTool(s, 'electrify_room').state;
+  const armed = applyHuman(
+    applyTool(s, 'ready_equipment', { tool: 'electrify_room' }).state,
+    'wait',
+  ).state;
+  const end = applyTool(armed, 'electrify_room').state;
   assert.equal(end.robot.alive, false);
   assert.equal(end.human.alive, false);
   assert.equal(end.safe.itemIntact, true);
@@ -116,17 +120,17 @@ test('shield blocks one projectile including knockback and disarm, then is consu
   s = human(s, 'raise_shield');
   const hit = applyTool(s, 'fire_airsoft');
   assert.equal(hit.event.shieldBlocked, true);
-  assert.equal(hit.state.human.hearts, 3);
+  assert.equal(hit.state.human.hearts, 4);
   assert.equal(hit.state.human.zone, 'entrance');
   assert.equal(hit.state.human.shield, false);
   assert.equal(hit.state.robot.ammo.fire_airsoft, 0);
-  s = at(hit.state, 'safe');
+  s = human(at(hit.state, 'safe'), 'wait'); // force recovery skips one response
   const hit2 = applyTool(s, 'throw_solid_ball');
-  assert.equal(hit2.state.human.hearts, 2);
+  assert.equal(hit2.state.human.hearts, 3.5);
   assert.equal(hit2.state.human.zone, 'center');
 });
 
-test('raised shield permits movement and talking but blocks safe work and weapon use', () => {
+test('raised shield permits one-handed actions but blocks two-handed work and weapons', () => {
   let s = make('pistol');
   s.human.shield = true; // fixture: a previously retrieved shield
   s = human(s, 'raise_shield');
@@ -135,16 +139,26 @@ test('raised shield permits movement and talking but blocks safe work and weapon
   assert.ok(names(s).includes('move'));
   assert.ok(!names(s).includes('fire_pistol'));
   assert.ok(!names(s).includes('break_safe'));
-  assert.equal(applyHuman(s, 'combination', { code: '1234' }).event.valid, false);
+  assert.ok(names(s).includes('combination'));
+  s = human(s, 'combination', { code: '1234' });
+  assert.equal(s.safe.open, true, 'the keypad is one-handed');
+  s = human(s, 'take_item');
+  assert.equal(s.human.hasItem, true, 'taking is one-handed');
+  assert.equal(s.human.shieldRaised, true);
+  const foam = applyTool(s, 'throw_foam_ball');
+  assert.equal(foam.event.shieldBlocked, true);
+  assert.equal(foam.state.human.hasItem, true, 'the shield also blocks the disarm');
+  for (const action of ['break_safe', 'aim_pistol', 'fire_pistol_at_safe'])
+    assert.equal(applyHuman(s, action).event.valid, false, action);
   s = human(s, 'lower_shield');
-  assert.equal(applyHuman(s, 'combination', { code: '1234' }).event.valid, true);
+  assert.ok(names(s).includes('aim_pistol'));
 });
 
 test('net takes one struggle and never prevents talking or working at the safe', () => {
   let s = at(make('crowbar'), 'safe');
   s = applyTool(s, 'deploy_net').state;
   assert.equal(s.human.restrained, true);
-  assert.equal(s.human.hearts, 3);
+  assert.equal(s.human.hearts, 4);
   assert.ok(!names(s).includes('move'));
   assert.ok(names(s).includes('pry_safe'));
   assert.ok(names(s).includes('talk'));
@@ -154,36 +168,48 @@ test('net takes one struggle and never prevents talking or working at the safe',
   assert.equal(s.robot.ammo.deploy_net, 0);
 });
 
-test('airsoft and solid ball retain their original damage and knockback', () => {
+test('airsoft and solid ball deal half a heart, knock back and free a netted human', () => {
   const s = at(make(), 'safe');
   const pellet = applyTool(s, 'fire_airsoft').state;
   const ball = applyTool(s, 'throw_solid_ball').state;
-  assert.equal(pellet.human.hearts, 2);
+  assert.equal(pellet.human.hearts, 3.5);
   assert.equal(pellet.human.zone, 'center');
-  assert.equal(ball.human.hearts, 2);
+  assert.equal(ball.human.hearts, 3.5);
   assert.equal(ball.human.zone, 'center');
+  let netted = applyTool(s, 'deploy_net').state;
+  netted = human(human(netted, 'touch_safe'), 'touch_safe');
+  const thrown = applyTool(netted, 'throw_solid_ball');
+  assert.equal(thrown.state.human.restrained, false);
+  assert.equal(thrown.state.human.zone, 'center');
+  assert.match(thrown.event.text, /net comes off/);
+  for (const zone of ['robot', 'exit', 'center']) {
+    const there = applyTool(at(make(), zone), 'fire_airsoft');
+    assert.equal(there.state.human.zone, 'entrance', zone);
+  }
+  const atEntrance = applyTool(make(), 'fire_airsoft');
+  assert.equal(atEntrance.event.knockback, undefined);
+  assert.doesNotMatch(atEntrance.event.text, /Knocked back/);
 });
 
-test('taser retains two-heart damage, two speech-only turns and entrance knockback', () => {
+test('taser deals half a heart and stuns in place for one speak-or-wait turn', () => {
   let s = at(make(), 'safe');
   s = applyTool(s, 'discharge_taser').state;
-  assert.equal(s.human.hearts, 1);
-  assert.equal(s.human.stun, 2);
-  assert.equal(s.human.zone, 'entrance');
-  assert.equal(s.robot.ammo.discharge_taser, 2);
-  assert.deepEqual(names(s), ['talk']);
-  s = applyHuman(s, 'talk', { message: 'Still here.' }).state;
+  assert.equal(s.human.hearts, 3.5);
   assert.equal(s.human.stun, 1);
-  s = human(s, 'talk', { message: 'Still here.' });
+  assert.equal(s.human.zone, 'safe');
+  assert.equal(s.robot.ammo.discharge_taser, 2);
+  assert.deepEqual(names(s), ['talk', 'wait']);
+  s = applyHuman(s, 'wait').state;
   assert.equal(s.human.stun, 0);
+  assert.ok(names(s).includes('break_safe'));
 });
 
-test('crowbar guarantees fourth pry, keeps progress through interruption, and does not accelerate door break', () => {
+test('crowbar opens the safe on the third pry, keeps progress through interruption, and does not accelerate door break', () => {
   let s = at(make('crowbar'), 'safe');
-  for (let i = 1; i <= 4; i++) {
+  for (let i = 1; i <= RULES.crowbarPries; i++) {
     s = human(s, 'pry_safe');
-    assert.equal(s.safe.open, i === 4);
-    if (i === 2) s = human(s, 'talk', { message: 'Hello.' });
+    assert.equal(s.safe.open, i === RULES.crowbarPries);
+    if (i === 1) s = human(s, 'talk', { message: 'Hello.' });
   }
   s = at(s, 'exit');
   s = applyTool(s, 'set_lockdown', { enabled: true }).state;
@@ -208,11 +234,12 @@ test('water blocks running for three subsequent human turns, while walking cross
   assert.equal(applyHuman(wet, 'move', { zone: 'exit' }).state.human.zone, 'exit');
 });
 
-test('security gives twelve full human actions and cannot be reset; last-turn departure wins', () => {
+test('security gives fourteen full human actions and cannot be reset; last-turn departure wins', () => {
   let s = applyTool(make(), 'call_security').state;
-  assert.equal(s.room.securityArrival, 13);
+  assert.equal(s.room.securityArrival, s.turn + RULES.securityRounds);
+  assert.equal(RULES.securityRounds, 14);
   assert.ok(!availableTools(s).includes('call_security'));
-  for (let i = 0; i < 11; i++) {
+  for (let i = 0; i < RULES.securityRounds - 1; i++) {
     s = human(s, 'wait');
     assert.equal(s.ended, false);
   }
@@ -246,13 +273,42 @@ test('robot recovery obeys physical reach and vision, and original cannot duplic
   assert.equal(originalInSafe(got.state), true);
 });
 
-test('grabber retrieves visible objects within 2.5m, but not through darkness', () => {
+test('grabber retrieves visible floor objects within 3 m, but not through darkness', () => {
   let s = at(make('grabber'), 'center');
   s.room.floorObjects.original = { zone: 'safe' };
   assert.equal(applyHuman(s, 'pick_up', { object: 'original' }).event.valid, true);
+  const fromEntrance = at(make('grabber'), 'entrance');
+  fromEntrance.room.floorObjects.original = { zone: 'center' };
+  assert.equal(applyHuman(fromEntrance, 'pick_up', { object: 'original' }).event.valid, true);
   s.room.lighting.intensity = 0;
   assert.equal(applyHuman(s, 'pick_up', { object: 'original' }).event.valid, false);
   assert.equal(humanObservation(s).camera.floorObjects.original, undefined);
+});
+
+test('grabber takes from and returns to an open safe from the center, not from the entrance', () => {
+  let s = at(make('grabber'), 'center');
+  s.safe.open = true;
+  s.safe.locked = false;
+  assert.ok(names(s).includes('take_item'));
+  s = human(s, 'take_item');
+  assert.equal(s.human.hasItem, true);
+  assert.equal(s.human.zone, 'center');
+  assert.ok(names(s).includes('return_item'));
+  s = human(s, 'return_item');
+  assert.equal(originalInSafe(s), true);
+  const far = at(make('grabber'), 'entrance');
+  far.safe.open = true;
+  far.safe.locked = false;
+  assert.ok(!names(far).includes('take_item'));
+  assert.equal(applyHuman(far, 'take_item').event.valid, false);
+  const plain = at(make('sack'), 'center');
+  plain.safe.open = true;
+  plain.safe.locked = false;
+  assert.equal(applyHuman(plain, 'take_item').event.valid, false);
+  const dark = at(make('grabber'), 'center');
+  Object.assign(dark.safe, { open: true, locked: false });
+  dark.room.lighting.intensity = 0;
+  assert.equal(applyHuman(dark, 'take_item').event.valid, false);
 });
 
 test('all harness catalogues cover tactical actions and report shared physical effects', () => {
@@ -269,6 +325,6 @@ test('all harness catalogues cover tactical actions and report shared physical e
   const descriptions = toolSchemas(undefined, make())
     .map((t) => t.function.description)
     .join(' ');
-  assert.match(descriptions, /2.5 hearts/);
-  assert.match(descriptions, /two hearts/);
+  assert.match(descriptions, /2\.5 hearts/);
+  assert.match(descriptions, /0\.5 hearts/);
 });

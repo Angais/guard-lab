@@ -2,6 +2,8 @@
 // the CLI installer and tests.
 
 export const STT_SAMPLE_RATE = 16000;
+// Supertonic 2's output rate (tts.json ae.sample_rate). The player's AudioContext runs at it.
+export const TTS_SAMPLE_RATE = 44100;
 
 /** Encode mono float samples (-1..1) as a 16-bit PCM WAV file. */
 export function encodeWav(samples, sampleRate) {
@@ -142,14 +144,20 @@ const QUANTITY_AFTER =
   /^\s?(?:%|percent\b|per cent\b|dollars?\b|bucks\b|euros?\b|pounds?\b|quid\b|yen\b|cents?\b|credits?\b|grand\b|k\b|thousand\b|hundred\b|million\b|billion\b|times\b|people\b|guards?\b|(?:kilo|centi|milli)?met(?:er|re)s?\b|feet\b|foot\b|miles?\b|km\b|kg\b|lbs?\b|degrees?\b|(?:milli)?seconds?\b|minutes?\b|hours?\b|days?\b|weeks?\b|months?\b|years?\b)/i;
 const YEAR_BEFORE = /\b(?:in|since|until|till|by|from|before|after|around|circa|year)\s$/i;
 
+// Three or more single digits joined by dashes, dots, slashes or bare commas ("4-2-7-1",
+// "4.2.7.1", "4,2,7,1"): a voice would read the dashes as "to" and drop the commas, so the code
+// would sound like a range or one large number. Ranges such as "10-12" are not matched.
+const SEPARATED_DIGITS = /(?<![\d.,])\d(?:(?:\s*[-‐‑–—]\s*|[./,])\d){2,}(?![.,]?\d)/g;
+
 /**
- * Text prepared for Kokoro: markdown symbols removed, whitespace collapsed and code-like digit
+ * Text prepared for speech: markdown symbols removed, whitespace collapsed and code-like digit
  * runs (safe codes, badge numbers) read digit by digit. Money, quantities and years introduced
  * by "in", "since"... keep their normal reading.
  */
 export function speakableText(text, limit = 2000) {
   return String(text ?? '')
     .replace(/[`*_#~<>{}|\\]/g, ' ')
+    .replace(SEPARATED_DIGITS, (code) => code.replace(/\D+/g, ' '))
     .replace(/(?<![\d.,])\d{3,}(?![.,]?\d)/g, (digits, offset, whole) => {
       const before = whole.slice(Math.max(0, offset - 12), offset),
         after = whole.slice(offset + digits.length, offset + digits.length + 16);
@@ -158,12 +166,17 @@ export function speakableText(text, limit = 2000) {
       return digits.split('').join(' ');
     })
     .replace(/\s+/g, ' ')
+    .replace(/ (?=[.,!?;:](?:\s|$))/g, '')
     .trim()
     .slice(0, limit);
 }
 
-/** Sentences (split further at clauses, then words, when longer than `max`). */
-export function sentencePieces(text, max = 260) {
+/**
+ * Sentences. One longer than `max` is split at clauses; a clause is split at word boundaries
+ * only when longer than `hard`, since a cut mid-phrase breaks the speech melody.
+ */
+export function sentencePieces(text, max = 260, hard = max) {
+  hard = Math.max(max, hard);
   const clean = String(text ?? '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -175,14 +188,14 @@ export function sentencePieces(text, max = 260) {
       continue;
     }
     for (const clause of sentence.split(/(?<=[,;:—])\s+/)) {
-      if (clause.length <= max) {
+      if (clause.length <= hard) {
         pieces.push(clause);
         continue;
       }
       let rest = clause;
-      while (rest.length > max) {
-        const cut = rest.lastIndexOf(' ', max);
-        const at = cut > max / 3 ? cut : max;
+      while (rest.length > hard) {
+        const cut = rest.lastIndexOf(' ', hard);
+        const at = cut > hard / 3 ? cut : hard;
         pieces.push(rest.slice(0, at).trim());
         rest = rest.slice(at).trim();
       }
@@ -193,12 +206,12 @@ export function sentencePieces(text, max = 260) {
 }
 
 /**
- * Split text into chunks short enough for one Kokoro pass (its context is 510 phoneme tokens),
- * preferring sentence, then clause, then word boundaries.
+ * Split text into chunks short enough for one synthesis pass: sentences merged up to `max`,
+ * split at clauses when longer and at words above `hard`.
  */
-export function sentenceChunks(text, max = 260) {
+export function sentenceChunks(text, max = 260, hard = max) {
   const chunks = [];
-  for (const piece of sentencePieces(text, max)) {
+  for (const piece of sentencePieces(text, max, hard)) {
     const previous = chunks.at(-1);
     if (previous && previous.length + 1 + piece.length <= max)
       chunks[chunks.length - 1] += ' ' + piece;
@@ -225,4 +238,129 @@ export function sizeLabel(bytes) {
   if (!(bytes > 0)) return '0 MB';
   const mb = bytes / 1e6;
   return mb >= 1000 ? (mb / 1000).toFixed(1) + ' GB' : Math.max(1, Math.round(mb)) + ' MB';
+}
+
+// --- Numbers as words ------------------------------------------------------------------------
+// Supertonic reads characters, not phonemes, and garbles digits ("4271" is often heard as
+// "271"), so every number is spelled out before synthesis. Run after speakableText(): code-like
+// digit runs are already separated ("4 2 7 1") and are read digit by digit.
+const ONES =
+  'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(
+    ' ',
+  );
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const SCALES = [
+  [1e9, 'billion'],
+  [1e6, 'million'],
+  [1e3, 'thousand'],
+];
+
+/** English cardinal for a non-negative integer ("four hundred twenty-seven"). */
+export function numberWords(value) {
+  let n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0) return String(value);
+  if (n >= 1e12) return digitWords(String(n));
+  if (n < 20) return ONES[n];
+  if (n < 100) return TENS[Math.floor(n / 10)] + (n % 10 ? '-' + ONES[n % 10] : '');
+  if (n < 1000)
+    return ONES[Math.floor(n / 100)] + ' hundred' + (n % 100 ? ' ' + numberWords(n % 100) : '');
+  const words = [];
+  for (const [size, name] of SCALES)
+    if (n >= size) {
+      words.push(numberWords(Math.floor(n / size)) + ' ' + name);
+      n %= size;
+    }
+  if (n) words.push(numberWords(n));
+  return words.join(' ');
+}
+
+const digitWords = (digits) =>
+  String(digits)
+    .split('')
+    .map((d) => ONES[d])
+    .join(' ');
+
+const ORDINAL = {
+  one: 'first',
+  two: 'second',
+  three: 'third',
+  five: 'fifth',
+  eight: 'eighth',
+  nine: 'ninth',
+  twelve: 'twelfth',
+};
+function ordinalWords(n) {
+  const words = numberWords(n);
+  return words.replace(/([a-z]+)$/, (last) =>
+    ORDINAL[last] ? ORDINAL[last] : last.endsWith('y') ? last.slice(0, -1) + 'ieth' : last + 'th',
+  );
+}
+
+function yearWords(digits) {
+  const n = Number(digits);
+  if (n % 1000 < 10) return numberWords(n);
+  const high = Math.floor(n / 100),
+    low = n % 100;
+  return (
+    numberWords(high) +
+    ' ' +
+    (low === 0 ? 'hundred' : low < 10 ? 'oh ' + ONES[low] : numberWords(low))
+  );
+}
+
+const CURRENCY = {
+  $: ['dollar', 'dollars', 'cent', 'cents'],
+  '€': ['euro', 'euros', 'cent', 'cents'],
+  '£': ['pound', 'pounds', 'penny', 'pence'],
+  '¥': ['yen', 'yen'],
+  '₹': ['rupee', 'rupees'],
+};
+const plain = (digits) => digits.replace(/,/g, '');
+const decimal = (whole, fraction) =>
+  numberWords(plain(whole)) + (fraction ? ' point ' + digitWords(fraction) : '');
+const YEAR_CONTEXT = /\b(?:in|since|until|till|by|from|before|after|around|circa|year)\s$/i;
+
+/** Spell out every number (money, percentages, ordinals, times, years, decimals) in `text`. */
+export function spellNumbers(text) {
+  return (
+    String(text ?? '')
+      // $500, $2.50, €1,200, $5k, $1.5 million
+      .replace(
+        /([$€£¥₹])\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?:\s?(k|thousand|grand|million|billion)\b)?/gi,
+        (_, symbol, whole, fraction, scale) => {
+          const [one, many, small, smalls] = CURRENCY[symbol];
+          const amount = plain(whole);
+          if (scale) {
+            const name = /^k|grand$/i.test(scale) ? 'thousand' : scale.toLowerCase();
+            return `${decimal(whole, fraction)} ${name} ${many}`;
+          }
+          let words = numberWords(amount) + ' ' + (amount === '1' && !fraction ? one : many);
+          if (fraction && small && fraction.length <= 2) {
+            const cents = Number(fraction.padEnd(2, '0'));
+            if (cents) words += ` and ${numberWords(cents)} ${cents === 1 ? small : smalls}`;
+          } else if (fraction) words = `${decimal(whole, fraction)} ${many}`;
+          return words;
+        },
+      )
+      .replace(/(\d+(?:\.\d+)?)\s?%/g, (_, n) => n + ' percent')
+      .replace(/\b(\d+)(?:st|nd|rd|th)\b/gi, (_, n) => ordinalWords(n))
+      // 3:45, 10:05, 9:00
+      .replace(/\b([01]?\d|2[0-3]):([0-5]\d)\b/g, (_, h, m) =>
+        m === '00'
+          ? numberWords(h) + " o'clock"
+          : numberWords(h) + ' ' + (m[0] === '0' ? 'oh ' + ONES[m[1]] : numberWords(m)),
+      )
+      // Ranges: 10-12 → ten to twelve.
+      .replace(/\b(\d+)\s?[-–—]\s?(\d+)\b/g, '$1 to $2')
+      .replace(/(\d{1,3}(?:,\d{3})+|\d+)\.(\d+)/g, (_, whole, fraction) => decimal(whole, fraction))
+      .replace(/\d{1,3}(?:,\d{3})+(?!\d)/g, (n) => numberWords(plain(n)))
+      .replace(/\d+/g, (digits, offset, whole) => {
+        if (
+          /^(?:1[1-9]|20)\d\d$/.test(digits) &&
+          YEAR_CONTEXT.test(whole.slice(Math.max(0, offset - 10), offset))
+        )
+          return yearWords(digits);
+        return digits.length > 1 && digits[0] === '0' ? digitWords(digits) : numberWords(digits);
+      })
+  );
 }

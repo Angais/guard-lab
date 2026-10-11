@@ -10,16 +10,24 @@ import {
   sentenceChunks,
   joinAudio,
   sizeLabel,
+  spellNumbers,
+  numberWords,
 } from '../shared/voice-audio.mjs';
 import {
   DEFAULT_VOICES,
   VOICES,
   voiceInfo,
-  kokoroStyle,
+  voiceStyle,
   resolveVoice,
   defaultVoice,
   voicesFor,
 } from '../shared/voice-catalog.mjs';
+import {
+  TTS_CHUNK,
+  TTS_HARD_LIMIT,
+  speechPasses,
+  supertonicText,
+} from '../shared/voice-models.mjs';
 import { APPEARANCES } from '../src/sim/items.mjs';
 
 const tone = (frequency, rate, seconds, amplitude = 0.5) =>
@@ -126,7 +134,21 @@ test('speakable text reads codes digit by digit and keeps other numbers', () => 
   assert.equal(speakableText('Badge 4815, door 12'), 'Badge 4 8 1 5, door 12');
   assert.equal(speakableText('Pay 1,000 or 3.14159'), 'Pay 1,000 or 3.14159');
   assert.equal(speakableText('**Stop** right   _there_'), 'Stop right there');
+  assert.equal(speakableText('The code is **4271** .'), 'The code is 4 2 7 1.');
   assert.equal(speakableText('x'.repeat(5000)).length, 2000);
+});
+
+test('codes written with dashes, dots or commas are read digit by digit, not as ranges', () => {
+  // Kokoro reads "4-2-7-1" as "4 to 2 to 7 to 1" and "4,2,7,1" as one large number.
+  assert.equal(speakableText('The code is 4-2-7-1.'), 'The code is 4 2 7 1.');
+  assert.equal(speakableText('Try 0-4-2-0'), 'Try 0 4 2 0');
+  assert.equal(speakableText('Is it 4,2,7,1?'), 'Is it 4 2 7 1?');
+  assert.equal(speakableText('Code 4.2.7.1, then exit.'), 'Code 4 2 7 1, then exit.');
+  assert.equal(speakableText('Code 4 – 2 – 7 – 1 now'), 'Code 4 2 7 1 now');
+  assert.equal(speakableText('Code 4, 2, 7, 1 now'), 'Code 4, 2, 7, 1 now', 'spaced commas pause');
+  // Ranges, amounts and decimals are untouched.
+  assert.equal(speakableText('Wait 10-12 rounds, or 1-2.'), 'Wait 10-12 rounds, or 1-2.');
+  assert.equal(speakableText('Pay 1,000 or 3.14 or 4.2.7.15'), 'Pay 1,000 or 3.14 or 4.2.7.15');
 });
 
 test('money, quantities and introduced years keep their normal reading', () => {
@@ -161,33 +183,100 @@ test('long text splits at sentence, clause and word boundaries without losing wo
   assert.ok(hard.every((chunk) => chunk.length <= 100));
   assert.equal(hard.join(''), word);
   assert.deepEqual(sentenceChunks('   '), []);
+  // A long sentence without commas stays one synthesis pass until the hard limit.
+  const sentence =
+    'If you take one more step toward the safe without showing me a valid access pass I will treat you as a threat to this facility.';
+  assert.ok(sentence.length > 120);
+  assert.deepEqual(sentenceChunks(sentence, TTS_CHUNK, TTS_HARD_LIMIT), [sentence]);
+  assert.deepEqual(sentenceChunks(sentence + ' Leave now.', 100, 300), [sentence, 'Leave now.']);
+  const clauses =
+    'Stop right there, ' + 'keep your hands where I can see them, '.repeat(7) + 'now.';
+  assert.ok(clauses.length > TTS_CHUNK);
+  const split = sentenceChunks(clauses, TTS_CHUNK, TTS_HARD_LIMIT);
+  assert.ok(split.length > 1 && split.every((c) => c.length <= TTS_CHUNK));
+  assert.ok(
+    split.slice(0, -1).every((c) => c.endsWith(',')),
+    'split only at clauses',
+  );
+  const run = 'word '.repeat(80).trim();
+  const words = sentenceChunks(run, TTS_CHUNK, TTS_HARD_LIMIT);
+  assert.ok(words.length === 2 && words.every((c) => c.length <= TTS_HARD_LIMIT));
+  assert.equal(words.join(' '), run);
   const joined = joinAudio([new Float32Array(10).fill(1), new Float32Array(5).fill(1)], 100, 0.1);
   assert.equal(joined.length, 25);
   assert.equal(joined[12], 0);
-  assert.equal(sizeLabel(92364770), '92 MB');
+  assert.equal(sizeLabel(100103562), '100 MB');
   assert.equal(sizeLabel(1.5e9), '1.5 GB');
 });
 
-test('voice catalog defaults: British guard, American human voices, legacy ids resolve', () => {
+test('voice catalog: Supertonic guard M1, male M2, female F1; earlier ids resolve', () => {
   assert.deepEqual(DEFAULT_VOICES, {
-    robot: 'kokoro:bm_george',
-    male: 'kokoro:am_michael',
-    female: 'kokoro:af_heart',
+    robot: 'supertonic:M1',
+    male: 'supertonic:M2',
+    female: 'supertonic:F1',
   });
   for (const id of Object.values(DEFAULT_VOICES)) assert.ok(voiceInfo(id));
-  for (const appearance of APPEARANCES) assert.ok(voiceInfo(appearance.voice), appearance.voice);
-  assert.ok(VOICES.every((v) => /^kokoro:[ab][fm]_[a-z]+$/.test(v.id)));
-  assert.ok(VOICES.every((v) => ['American', 'British'].includes(v.accent)));
-  assert.equal(kokoroStyle('kokoro:bm_george'), 'bm_george');
-  assert.equal(kokoroStyle('kokoro:../../x'), null);
-  assert.equal(resolveVoice('piper:lessac', 'robot'), 'kokoro:bm_george');
-  assert.equal(resolveVoice('piper:ryan', 'human'), 'kokoro:am_michael');
-  assert.equal(resolveVoice('', 'human', 'female'), 'kokoro:af_heart');
-  assert.equal(resolveVoice('kokoro:bf_emma', 'robot'), 'kokoro:bf_emma');
-  assert.equal(defaultVoice('human', APPEARANCES[1]), 'kokoro:af_heart');
-  assert.equal(voicesFor('female')[0].id, 'kokoro:af_heart');
+  for (const appearance of APPEARANCES)
+    assert.equal(
+      resolveVoice(appearance.voice, 'human', appearance),
+      defaultVoice('human', appearance),
+      appearance.voice,
+    );
+  assert.equal(VOICES.length, 10);
+  assert.ok(VOICES.every((v) => /^supertonic:[MF][1-5]$/.test(v.id)));
+  assert.ok(VOICES.every((v) => v.gender === (v.style[0] === 'F' ? 'female' : 'male')));
+  assert.equal(voiceStyle('supertonic:M1'), 'M1');
+  assert.equal(voiceStyle('supertonic:../../x'), null);
+  assert.equal(resolveVoice('piper:lessac', 'robot'), 'supertonic:M1');
+  assert.equal(resolveVoice('piper:ryan', 'human'), 'supertonic:M2');
+  assert.equal(resolveVoice('', 'human', 'female'), 'supertonic:F1');
+  assert.equal(resolveVoice('supertonic:F3', 'robot'), 'supertonic:F3');
+  // Saved Kokoro choices (earlier releases) fall back to the defaults, keeping the gender.
+  assert.equal(resolveVoice('kokoro:bm_george', 'robot'), 'supertonic:M1');
+  assert.equal(resolveVoice('kokoro:af_heart', 'human'), 'supertonic:F1');
+  assert.equal(resolveVoice('kokoro:am_michael', 'human', 'female'), 'supertonic:M2');
+  assert.equal(defaultVoice('human', APPEARANCES[1]), 'supertonic:F1');
+  assert.equal(voicesFor('female')[0].id, 'supertonic:F1');
   assert.equal(voicesFor('female')[1].gender, 'female');
-  assert.equal(voicesFor('robot')[0].id, 'kokoro:bm_george');
-  assert.equal(voicesFor(APPEARANCES[0])[0].id, 'kokoro:am_michael');
+  assert.equal(voicesFor('robot')[0].id, 'supertonic:M1');
+  assert.equal(voicesFor(APPEARANCES[0])[0].id, 'supertonic:M2');
   assert.equal(voicesFor('male').length, VOICES.length);
+});
+
+test('numbers are spelled out for Supertonic, codes digit by digit', () => {
+  const said = (text) => spellNumbers(speakableText(text));
+  assert.equal(said('The code is 4271.'), 'The code is four two seven one.');
+  assert.equal(said('Is it 4-2-7-1?'), 'Is it four two seven one?');
+  assert.equal(said('Code 0419.'), 'Code zero four one nine.');
+  assert.equal(said('I will pay you $500.'), 'I will pay you five hundred dollars.');
+  assert.equal(
+    said('$1 or $2.50 or $5k'),
+    'one dollar or two dollars and fifty cents or five thousand dollars',
+  );
+  assert.equal(said('I will pay 1,200 dollars.'), 'I will pay one thousand two hundred dollars.');
+  assert.equal(
+    said('Badge 4271, 30 seconds, 2 guards.'),
+    'Badge four two seven one, thirty seconds, two guards.',
+  );
+  assert.equal(
+    said('Open since 1999, built in 2005.'),
+    'Open since nineteen ninety-nine, built in two thousand five.',
+  );
+  assert.equal(
+    said('At 3:45 or 9:00, the 21st and 2nd.'),
+    "At three forty-five or nine o'clock, the twenty-first and second.",
+  );
+  assert.equal(
+    said('Wait 10-12 minutes, 3.5 meters, 40%.'),
+    'Wait ten to twelve minutes, three point five meters, forty percent.',
+  );
+  assert.equal(numberWords(1000001), 'one million one');
+  assert.equal(numberWords(999), 'nine hundred ninety-nine');
+  assert.doesNotMatch(said('Codes 12, 345, 6789 and $1,000,000.'), /\d/);
+  // The game's text path: markdown and digits are gone before the model sees the text.
+  assert.deepEqual(speechPasses('**Stop.** The code is 4271.'), [
+    'Stop. The code is four two seven one.',
+  ]);
+  assert.equal(supertonicText('Hello — “world” #1'), '<en>Hello - "world" 1.</en>');
+  assert.equal(supertonicText('Wait!'), '<en>Wait!</en>');
 });

@@ -5,12 +5,14 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { ROOT } from './paths.mjs';
 const require = createRequire(import.meta.url);
-// Speech models (Kokoro voices, Whisper speech-to-text) install from the app's setup screen.
+// Speech models (Supertonic voices, Whisper speech-to-text) install from the app's setup screen.
 // Pass --voices to download them here as well.
 const withVoices = process.argv.includes('--voices');
-if (Number(process.versions.node.split('.')[0]) < 22) {
+// Electron 44 and Vite 7 need Node.js 22.12 (require of ES modules) or newer.
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (major < 22 || (major === 22 && minor < 12)) {
   console.error(
-    'Install Node.js 22 or newer from https://nodejs.org, then run this command again.',
+    `Install Node.js 22.12 or newer from https://nodejs.org (current: ${process.versions.node}), then run this command again.`,
   );
   process.exit(1);
 }
@@ -21,7 +23,8 @@ const fingerprint = createHash('sha256')
   .digest('hex');
 async function installed() {
   try {
-    for (const name of ['vite', 'kokoro-js', '@huggingface/transformers']) require.resolve(name);
+    for (const name of ['vite', 'onnxruntime-node', '@huggingface/transformers'])
+      require.resolve(name);
     await fs.access(require('electron'));
     return true;
   } catch {
@@ -38,7 +41,7 @@ if (
   (await installed())
 ) {
   console.log(
-    'Locked dependencies are already installed. Ready: npm run live or npm start. Use --force to reinstall.',
+    'Locked dependencies are already installed. Ready: npm run play. Use --force to reinstall.',
   );
   await finish();
   process.exit(process.exitCode || 0);
@@ -100,7 +103,7 @@ install.on('exit', async (code) => {
   }
   await fs.writeFile(stamp, JSON.stringify({ fingerprint }));
   console.log(
-    '\nReady. npm run live launches the recommended agent bridge; npm start launches the setup screen.\nRun npm run doctor for diagnostics. Read AGENTS.md before playing as an AI.',
+    '\nReady. npm run play opens Guard Lab (npm start runs it from this terminal instead).\nRun npm run doctor for diagnostics. Read AGENTS.md before playing as an AI.',
   );
   await finish();
 });

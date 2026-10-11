@@ -19,6 +19,15 @@ test('an open safe stays open throughout every subsequent action', () => {
     previous = value;
   }
   assert.equal(safeDoorOpenness(true, false, 1), 1);
+  // A door the event closes (G-01 re-locking after recovery) swings shut, never snaps.
+  let closing = 1;
+  for (let t = 0; t <= 1; t += 0.01) {
+    const value = safeDoorOpenness(false, true, t, 0.72);
+    assert.ok(value <= closing && value >= 0);
+    if (t < 0.72) assert.equal(value, 1);
+    closing = value;
+  }
+  assert.equal(safeDoorOpenness(false, true, 1, 0.72), 0);
 });
 test('walk feet stay above the floor with flat soles and the stance foot plants', () => {
   for (let d = 0; d < 9; d += 0.013)

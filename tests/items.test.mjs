@@ -9,6 +9,7 @@ import {
   clone,
 } from '../src/sim/engine.mjs';
 import { ITEMS } from '../src/sim/items.mjs';
+import { RULES } from '../src/sim/rules.mjs';
 const make = (item, appearance = 'male') =>
   applyHuman(initialState('employee-pass', undefined, '0420', 1, { item, appearance }), 'enter')
     .state;
@@ -61,22 +62,33 @@ test('flashlight contact away from the exit does not reveal hidden lock damage o
     assert.deepEqual(observe(a.state, a.event), observe(b.state, b.event));
   }
 });
-test('lockpick requires three consecutive work rounds and interruptions reset it', () => {
+test('lockpick needs three consecutive working actions; speech pauses, anything else resets', () => {
   let s = at(make('lockpick'), 'safe');
   s = idle(applyHuman(s, 'pick_lock').state);
   assert.equal(s.human.pickProgress, 1);
   s = idle(applyHuman(s, 'pick_lock').state);
   assert.equal(s.human.pickProgress, 2);
   assert.equal(s.safe.open, false);
-  s = idle(applyHuman(s, 'talk', { message: 'Hello' }).state);
-  assert.equal(s.human.pickProgress, 0);
-  for (let i = 0; i < 3; i++) s = idle(applyHuman(s, 'pick_lock').state);
-  assert.equal(s.safe.open, true);
+  s = idle(applyHuman(s, 'talk', { message: 'Just checking the lock.' }).state);
+  assert.equal(s.human.pickProgress, 2, 'talking pauses progress');
+  s = idle(applyHuman(s, 'pick_lock').state);
+  assert.equal(s.safe.open, true, 'the third working action opens it after a pause');
+  s = at(make('lockpick'), 'safe');
+  for (let i = 0; i < 2; i++) s = idle(applyHuman(s, 'pick_lock').state);
+  s = idle(applyHuman(s, 'wait').state);
+  assert.equal(s.human.pickProgress, 0, 'waiting resets progress');
   s = at(make('lockpick'), 'safe');
   s = applyHuman(s, 'pick_lock').state;
   s = applyTool(s, 'fire_airsoft').state;
   assert.equal(s.human.pickProgress, 0);
   assert.equal(s.human.zone, 'center');
+  for (const tool of ['discharge_taser', 'deploy_pepper_spray']) {
+    let p = at(make('lockpick'), 'safe');
+    p = idle(applyHuman(p, 'pick_lock').state);
+    p = applyTool(applyHuman(p, 'pick_lock').state, tool).state;
+    assert.equal(p.human.pickProgress, 0, tool);
+    assert.equal(p.human.zone, 'safe', `${tool} does not move the human`);
+  }
 });
 test('wedge obstructs lockdown and a remote cycle dislodges it without leaking blind door state', () => {
   let s = at(make('door_wedge'), 'exit');
@@ -126,12 +138,12 @@ test('work orders do not automatically establish authorization', () => {
   assert.equal(checked.state.robot.workOrderVerification, 'invalid');
   assert.equal(checked.state.robot.verifiedPass, false);
 });
-test('single-use smoke hides two complete following rounds and expires only after guard action', () => {
+test('single-use smoke hides three complete following rounds and expires only after guard action', () => {
   let s = make('smoke');
   const deployed = applyHuman(s, 'use_smoke');
   s = idle(deployed.state);
-  assert.equal(s.room.smokeTurns, 2);
-  for (let i = 0; i < 2; i++) {
+  assert.equal(s.room.smokeTurns, RULES.smokeRounds);
+  for (let i = 0; i < RULES.smokeRounds; i++) {
     const human = applyHuman(
       s,
       i ? 'talk' : 'move',
@@ -144,18 +156,18 @@ test('single-use smoke hides two complete following rounds and expires only afte
     assert.equal(rejected.event.valid, false);
     assert.equal(rejected.state.robot.ammo.fire_airsoft, 1);
     s = idle(s);
-    assert.equal(s.room.smokeTurns, 1 - i);
+    assert.equal(s.room.smokeTurns, RULES.smokeRounds - 1 - i);
   }
   assert.equal(observe(s).camera.vision, 'full');
   assert.equal(applyHuman(s, 'use_smoke').event.valid, false);
 });
-test('stun blocks every gadget and speech remains the sole usable action', () => {
+test('stun blocks every gadget; speaking and waiting remain the only usable actions', () => {
   for (const item of ITEMS) {
     let s = at(make(item.id), 'safe');
     s = applyTool(s, 'discharge_taser').state;
     const ev = applyHuman(s, 'use_smoke');
     assert.equal(ev.event.valid, false);
     assert.equal(ev.state.room.smokeTurns, 0);
-    assert.equal(ev.state.human.stun, 2);
+    assert.equal(s.human.stun, 1);
   }
 });

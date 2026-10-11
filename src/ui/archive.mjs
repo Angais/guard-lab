@@ -1,4 +1,6 @@
 // Async browser-local storage keeps large turn records off the render path.
+import { initialState } from '../sim/engine.mjs';
+
 let opening;
 const known = new Map();
 function database() {
@@ -39,4 +41,21 @@ export async function saveArchive(records) {
   await completion(tx);
   known.clear();
   for (const [id, record] of next) known.set(id, record);
+}
+
+// The newest state schema is whatever a fresh encounter is stamped with, so a new engine
+// version never locks out the recordings it just exported.
+export const STATE_VERSION = initialState('employee-pass').version;
+
+// A file is replayable when every step carries both actors' state from a known schema.
+export function isRecording(record) {
+  const version = record?.initial?.version;
+  return (
+    Number.isInteger(version) &&
+    version >= 1 &&
+    version <= STATE_VERSION &&
+    Array.isArray(record.events) &&
+    Boolean(record.state?.human) &&
+    record.events.every((ev) => ev?.state?.human && ev?.state?.robot)
+  );
 }

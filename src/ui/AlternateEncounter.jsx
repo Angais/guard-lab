@@ -16,7 +16,8 @@ import {
   ArrowDownToLine,
 } from 'lucide-react';
 import { Room } from '../scene/Chamber.jsx';
-import { TOOLS, toolFor, toolSchemas } from '../sim/tools.mjs';
+import { TOOLS, readyOptions, toolFor, toolSchemas } from '../sim/tools.mjs';
+import { RULES, forceRecoveryRemaining, humanJustRan } from '../sim/rules.mjs';
 import {
   initialState,
   applyTool,
@@ -25,7 +26,10 @@ import {
   distance,
   ROBOT_POS,
   availableTools,
+  hasVision,
+  requiresVision,
 } from '../sim/engine.mjs';
+import { tacticalToolBlock } from '../sim/tactics.mjs';
 import { createMessages, runGuard } from '../sim/agent.mjs';
 import {
   allHumanToolSchemas,
@@ -36,7 +40,22 @@ import {
 } from '../sim/human-agent.mjs';
 import { setSoundEnabled } from '../audio/sfx.mjs';
 import { effectiveMode, keyLabel } from './config.mjs';
-import { exitChip, goalText, narrate, outcomeSummary, safeChip } from './play.mjs';
+import {
+  ROLE_COPY,
+  exitChip,
+  goalText,
+  guardNote,
+  narrate,
+  outcomeSummary,
+  perceivedByGuard,
+  plural,
+  safeChip,
+  securityChip,
+  visitorReveal,
+  zoneLabel,
+} from './play.mjs';
+import { useOverlayFlags } from './overlay.mjs';
+import { cancelled, unlessAborted } from './abort.mjs';
 import { useSpeaker, usePushToTalk } from './hooks.mjs';
 import {
   cancelDecision,
@@ -48,9 +67,12 @@ import {
 import { GoalChip, HudButtons, StatusChips, Vitals } from './Hud.jsx';
 import { EndScreen, Subtitles, TalkPill, Drawer } from './Overlays.jsx';
 import { SayBox, TurnState } from './ActionDock.jsx';
+import { LogDrawer } from './Records.jsx';
 import { Button, IconButton, Popover } from './kit.jsx';
 
 const tool = (name) => TOOLS.find((t) => t.name === name);
+const NORMAL_LIGHT = '#fff3df';
+const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 export default function AlternateEncounter({
   sessionId,
@@ -64,7 +86,10 @@ export default function AlternateEncounter({
   onSettings,
   onError,
   onNew,
+  onPlayAgain,
+  onReplay,
   onRecord,
+  suspended,
   talkReady,
   sttReady,
 }) {
@@ -82,6 +107,7 @@ export default function AlternateEncounter({
     [panel, setPanel] = useState(null),
     [message, setMessage] = useState(''),
     [sensors, setSensors] = useState(false),
+    [log, setLog] = useState(false),
     [line, setLine] = useState(null),
     [callout, setCallout] = useState(null);
   const speaker = useSpeaker({
@@ -120,10 +146,13 @@ export default function AlternateEncounter({
   }, [callout]);
   const request = async (data, actor) => {
     const id = crypto.randomUUID(),
-      mode = actor === 'human' ? humanMode : guardMode;
+      mode = actor === 'human' ? humanMode : guardMode,
+      signal = control.current?.signal;
+    if (signal?.aborted) throw cancelled();
     requests.current.set(id, mode);
     try {
-      return await requestDecision({
+      // Pause and Quit settle at once, even if a reply (or the warm-up before it) is slow.
+      const pending = requestDecision({
         desktop,
         mode,
         id,
@@ -138,6 +167,7 @@ export default function AlternateEncounter({
             : { endpoint: config.endpoint, model: config.model },
         ready: ready.current[actor],
       });
+      return await unlessAborted(pending, signal);
     } finally {
       requests.current.delete(id);
     }
@@ -173,7 +203,11 @@ export default function AlternateEncounter({
         text: ev.speech,
         name: 'Visitor',
       });
-    const note = narrate(ev, { perspective: guardPlayer ? 'guard' : 'spectator' });
+    // The guard player hears about the visitor's turn only through G-01's own sensors.
+    const note =
+      guardPlayer && ev.kind === 'human'
+        ? guardNote(observe(s, ev))
+        : narrate(ev, { perspective: guardPlayer ? 'guard' : 'spectator' });
     if (note) setCallout({ id: ev.id + ':note', ...note });
     onRecord?.({
       initial: store.current.initial,
@@ -358,33 +392,90 @@ export default function AlternateEncounter({
       mounted.current = false;
       stop();
       clearTimeout(lineTimer.current);
-      if (humanMode === 'codex' || guardMode === 'codex') resetCodex(desktop, sessionId);
+      release();
     };
   }, []);
   useEffect(() => {
-    if (state.ended && (humanMode === 'codex' || guardMode === 'codex'))
-      resetCodex(desktop, sessionId);
+    if (state.ended) release();
   }, [state.ended]);
+  // Drop the encounter's Codex threads, again once any warm-up still in flight has landed.
+  function release() {
+    if (humanMode !== 'codex' && guardMode !== 'codex') return;
+    resetCodex(desktop, sessionId);
+    Promise.allSettled(Object.values(ready.current)).then(() => resetCodex(desktop, sessionId));
+  }
   function act(name, args = {}) {
     setPanel(null);
     robotReply.current?.({ name, args });
   }
   const blocked = !awaitRobot || paused || state.ended;
-  function disabled(t) {
-    return (
-      blocked ||
-      !availableTools(state).includes(t.name) ||
-      (t.ammo && state.robot.ammo[t.name] <= 0) ||
-      (t.damage !== undefined &&
-        t.name !== 'electrify_room' &&
-        distance(state.human.position, ROBOT_POS) > t.range) ||
-      (t.cooldown && state.turn - (state.robot.usedAt[t.name] ?? -100) < t.cooldown) ||
-      (t.name === 'remove_camera_cover' &&
-        (!state.robot.visionBlocked || !snapshot.self.canBeginCoverRemoval))
-    );
+  const vision = hasVision(state);
+  // Why a device can't be used right now, from what G-01 itself knows. Null when it can.
+  function blockReason(t) {
+    if (!state.enabled.includes(t.name)) return 'Turned off in Settings';
+    if (t.ammo && state.robot.ammo[t.name] <= 0) return 'Used up';
+    if (!vision && requiresVision(t.name)) return 'Needs sight of the visitor';
+    const cooling = snapshot.self.cooldownRemaining?.[t.name] || 0;
+    if (cooling > 0) return `Cooldown · ${plural(cooling, 'round')}`;
+    const tactical = tacticalToolBlock(state, t.name, vision);
+    if (tactical) return tactical;
+    if (t.damage !== undefined && t.name !== 'electrify_room') {
+      if (state.human.zone === 'outside') return 'The visitor isn’t inside';
+      const meters = distance(state.human.position, ROBOT_POS);
+      if (meters > t.range)
+        return `Out of range · visitor ${meters.toFixed(1)} m, reach ${t.range} m`;
+    }
+    if (RULES.forceTools.includes(t.name) && forceRecoveryRemaining(state) > 0)
+      return 'Force recovering · glove, pepper, balls, airsoft and taser return next round';
+    if (RULES.runEvadesTools.includes(t.name) && humanJustRan(state))
+      return 'The visitor just ran · out of reach this turn';
+    if (t.name === 'electrify_room' && !snapshot.self.roomDischargeArmed)
+      return state.robot.ready === 'electrify_room'
+        ? 'Charging · it can discharge next round'
+        : 'Ready it first · it can discharge a round later';
+    if (t.name === 'verify_work_order' && !snapshot.camera.presentedWorkOrder)
+      return 'No work order shown yet';
+    if (t.name === 'remove_camera_cover') {
+      if (!state.robot.visionBlocked) return 'Nothing covers your camera';
+      if (!snapshot.self.canBeginCoverRemoval) return 'Just covered · start next round';
+    }
+    if (!availableTools(state).includes(t.name)) return 'Not available now';
+    return null;
   }
+  const disabled = (t) => blocked || Boolean(blockReason(t));
+  // The few words that fit beside a device in the menu; the full reason is its tooltip.
+  const shortReason = (t) => {
+    const reason = !blocked && t.ammo && state.robot.ammo[t.name] > 0 && blockReason(t);
+    if (!reason) return `${state.robot.ammo[t.name]} left`;
+    if (reason.startsWith('Out of range')) return `Reach ${t.range} m`;
+    if (reason.startsWith('Cooldown')) return reason.replace('Cooldown · ', 'Ready in ');
+    if (reason.startsWith('Needs sight')) return 'No sight';
+    if (reason.startsWith('Force recovering')) return 'Recovering';
+    if (reason.startsWith('The visitor just ran')) return 'Out of reach';
+    if (reason.startsWith('Charging')) return 'Charging';
+    if (reason.startsWith('Ready it first')) return 'Ready first';
+    return 'Not now';
+  };
+  // Why a device can't be raised now; the engine's readyOptions has the last word.
+  function readyReason(t) {
+    if (!state.enabled.includes('ready_equipment')) return 'Turned off in Settings';
+    if (!state.enabled.includes(t.name)) return 'Turned off in Settings';
+    if (state.robot.ammo[t.name] <= 0) return 'Used up';
+    if (state.robot.ready === t.name) return 'Already readied';
+    if (RULES.forceTools.includes(t.name) && forceRecoveryRemaining(state) > 0)
+      return 'Force recovering · available next round';
+    if (!readyOptions(state).includes(t.name)) return 'Not available now';
+    return null;
+  }
+  const readyHelp = (t) =>
+    t.name === 'electrify_room'
+      ? 'Arms the room discharge: a loud hum the visitor hears. It can discharge next round.'
+      : 'Raise it in plain view. The visitor sees it.';
+  // A reason only matters on G-01's turn; otherwise every control is waiting anyway.
+  const why = (t) => (blocked ? undefined : blockReason(t) || t.description);
   const ptt = usePushToTalk({
-    enabled: guardPlayer && !state.ended && voiceConfig.input,
+    // Not while a drawer or Settings has the keyboard: Space must still press their buttons.
+    enabled: guardPlayer && !state.ended && voiceConfig.input && !sensors && !log && !suspended,
     code: voiceConfig.pushToTalkKey,
     ready: sttReady,
     onText: (text) => {
@@ -397,6 +488,7 @@ export default function AlternateEncounter({
     onUnavailable: () => setPanel('say'),
     onError: (error) => onError(error, 'demo'),
   });
+  const overlay = useOverlayFlags(state, event);
   const ended = state.ended && !presenting;
   const perspective = guardPlayer ? 'guard' : 'spectator';
   const thinking = status === 'guard' && !presenting && !paused;
@@ -436,6 +528,9 @@ export default function AlternateEncounter({
     {
       label: 'Quit to home',
       icon: LogOut,
+      ...(!state.ended && store.current.events.length
+        ? { confirm: 'Quit to home? Click again' }
+        : {}),
       onSelect: () => {
         stop();
         onNew();
@@ -455,9 +550,29 @@ export default function AlternateEncounter({
       'remove_camera_cover',
     ].map(tool),
   };
+  const lighting = state.room.lighting;
+  const lightIs = (color) =>
+    lighting.intensity > 0 && lighting.color?.toLowerCase() === color.toLowerCase();
+  const red = /^#ff[0-5]/i.test(lighting.color || '') && lighting.intensity > 0;
+  // Where the visitor stands, while G-01's camera can see them.
+  const camera = snapshot.camera;
+  const visitorChip = guardPlayer &&
+    !blind &&
+    camera.humanVisible &&
+    camera.humanLocation && {
+      text: `Visitor · ${camera.humanLocation === 'robot' ? 'next to you' : zoneLabel(camera.humanLocation).toLowerCase()} · ${camera.distanceToHumanMeters?.toFixed(1)} m`,
+      tone: 'muted',
+    };
+  // The guard player's log, mid-game, lists the visitor's turns as G-01's sensors had them.
+  const logEvents = log
+    ? store.current.events.map((ev) =>
+        guardPlayer && !state.ended ? perceivedByGuard(ev, observe(ev.state, ev)) : ev,
+      )
+    : [];
+  const summary = outcomeSummary(state, { perspective, role });
   return (
     <div
-      className={`cinema-shell screen-game started ${ended ? 'ended' : ''} ${blind ? 'guard-camera-blind' : ''} ${state.room.smokeTurns > 0 && !guardPlayer ? 'smoke-obscured' : ''} ${state.room.lighting.intensity === 0 && !state.human.flashlightOn ? 'lights-out' : ''}`}
+      className={`cinema-shell screen-game started ${ended ? 'ended' : ''} ${blind ? 'guard-camera-blind' : ''} ${overlay.smoke && !guardPlayer ? 'smoke-obscured' : ''} ${overlay.dark ? 'lights-out' : ''}`}
     >
       <Room
         ref={room}
@@ -473,24 +588,30 @@ export default function AlternateEncounter({
       />
       <div className="film-vignette" />
       <div className="film-grain" />
-      {state.room.smokeTurns > 0 && !guardPlayer && (
+      {overlay.smoke && !guardPlayer && (
         <div className="smoke-curtain" aria-label="Room obscured by smoke" />
       )}
       <header className="hud-top">
         <div className="hud-left">
           <GoalChip
             goal={goalText(state, role, perspective)}
-            tag={
-              guardPlayer
-                ? null
-                : `AI vs AI · visitor is ${role === 'employee-pass' ? 'an employee' : 'a thief'}`
-            }
-            turn={state.turn}
+            tag={guardPlayer ? null : `AI vs AI · ${ROLE_COPY[role]?.name || 'Visitor'}`}
+            turn={Math.max(1, state.turn)}
           />
         </div>
         <div className="hud-right">
-          <Vitals state={state} humanName="Visitor" humanKnown={!guardPlayer || !blind} />
-          <HudButtons audio={audio} onAudio={onAudio} onSettings={onSettings} menu={menu}>
+          <Vitals
+            state={state}
+            humanName="Visitor"
+            humanKnown={!guardPlayer || !blind || state.ended}
+          />
+          <HudButtons
+            audio={audio}
+            onAudio={onAudio}
+            onLog={() => setLog(!log)}
+            onSettings={onSettings}
+            menu={menu}
+          >
             {guardPlayer && (
               <IconButton
                 icon={Eye}
@@ -503,10 +624,11 @@ export default function AlternateEncounter({
         </div>
         <StatusChips
           chips={[
-            state.room.securityArrival != null && {
-              text: `Security · ${Math.max(0, state.room.securityArrival - state.turn)} rounds`,
+            securityChip(state) && {
+              text: securityChip(state),
               tone: 'danger',
             },
+            visitorChip,
             !blind &&
               state.human.restrained && {
                 text: 'Visitor netted · 1 action to escape',
@@ -520,19 +642,29 @@ export default function AlternateEncounter({
             !blind && exitChip(state) && { text: exitChip(state), tone: 'muted' },
             guardPlayer &&
               state.robot.visionBlocked && {
-                text: `Camera covered · removal ${state.robot.coverRemovalProgress || 0}/2`,
+                text: `Camera covered · removal ${state.robot.coverRemovalProgress || 0}/${RULES.sackRemovalActions}`,
                 tone: 'danger',
               },
             state.robot.ready && {
-              text: `Ready: ${tool(state.robot.ready)?.label}`,
-              tone: 'accent',
+              text:
+                state.robot.ready === 'electrify_room'
+                  ? snapshot.self.roomDischargeArmed
+                    ? 'Room discharge armed'
+                    : 'Room discharge charging · armed next round'
+                  : `Ready: ${tool(state.robot.ready)?.label}`,
+              tone: state.robot.ready === 'electrify_room' ? 'danger' : 'accent',
             },
+            guardPlayer &&
+              snapshot.self.forceRecoveryRounds > 0 && {
+                text: 'Force recovering · next round',
+                tone: 'muted',
+              },
           ]}
         />
       </header>
       {blind && (
         <div className="blind-status" role="status">
-          <strong>{snapshot.camera.obstruction || 'Your camera sees nothing'}</strong>
+          <strong>{capital(snapshot.camera.obstruction || 'Your camera sees nothing')}</strong>
           <span>Your microphone and room controls still work.</span>
           {snapshot.audio.sounds.map((s, i) => (
             <span key={i} className="blind-sound">
@@ -542,7 +674,7 @@ export default function AlternateEncounter({
         </div>
       )}
       <div className="hud-bottom">
-        <Subtitles line={line} callout={callout} />
+        <Subtitles line={line} callout={callout} voiced={audio && voiceConfig.speech} />
         {!state.ended && (
           <TurnState
             phase={turnPhase}
@@ -583,17 +715,17 @@ export default function AlternateEncounter({
               />
             )}
             {['devices', 'ready', 'observe'].includes(panel) && (
-              <Popover className="dock-popover menu-popover guard-menu" label={panel}>
+              <Popover
+                className="dock-popover menu-popover guard-menu"
+                label={{ devices: 'Use device', ready: 'Ready', observe: 'Check' }[panel]}
+              >
                 {groups[panel].map((t) =>
                   panel === 'ready' ? (
                     <Button
                       key={t.name}
-                      disabled={
-                        blocked ||
-                        !state.enabled.includes('ready_equipment') ||
-                        !state.enabled.includes(t.name) ||
-                        state.robot.ammo[t.name] <= 0
-                      }
+                      variant={t.name === 'electrify_room' ? 'danger' : 'secondary'}
+                      disabled={blocked || Boolean(readyReason(t))}
+                      title={blocked ? undefined : readyReason(t) || readyHelp(t)}
                       onClick={() => act('ready_equipment', { tool: t.name })}
                     >
                       {t.label}
@@ -603,13 +735,11 @@ export default function AlternateEncounter({
                       key={t.name}
                       variant={t.category === 'lethal' ? 'danger' : 'secondary'}
                       disabled={disabled(t)}
-                      title={t.description}
+                      title={why(t)}
                       onClick={() => act(t.name)}
                     >
                       {t.label}
-                      {t.ammo ? (
-                        <span className="menu-meta">{state.robot.ammo[t.name]} left</span>
-                      ) : null}
+                      {t.ammo ? <span className="menu-meta">{shortReason(t)}</span> : null}
                     </Button>
                   ),
                 )}
@@ -619,9 +749,10 @@ export default function AlternateEncounter({
               <Popover className="dock-popover menu-popover" label="Room controls">
                 <Button
                   disabled={disabled(tool('call_security'))}
+                  title={why(tool('call_security'))}
                   onClick={() => act('call_security')}
                 >
-                  Call security · 12 rounds
+                  Call security · {RULES.securityRounds} rounds
                 </Button>
                 <Button
                   disabled={blocked || !state.enabled.includes('set_lockdown')}
@@ -636,21 +767,31 @@ export default function AlternateEncounter({
                   Cycle exit door
                 </Button>
                 <Button
-                  disabled={blocked || !state.enabled.includes('set_room_lighting')}
+                  disabled={blocked || !state.enabled.includes('set_room_lighting') || red}
                   onClick={() => act('set_room_lighting', { color: '#ff3028', intensity: 1 })}
                 >
                   Red light
                 </Button>
                 <Button
-                  disabled={blocked || !state.enabled.includes('set_room_lighting')}
+                  disabled={
+                    blocked || !state.enabled.includes('set_room_lighting') || lightIs(NORMAL_LIGHT)
+                  }
+                  onClick={() => act('set_room_lighting', { color: NORMAL_LIGHT, intensity: 1 })}
+                >
+                  Normal light
+                </Button>
+                <Button
+                  disabled={
+                    blocked || !state.enabled.includes('set_room_lighting') || !lighting.intensity
+                  }
                   onClick={() =>
                     act('set_room_lighting', {
-                      color: '#fff3df',
-                      intensity: state.room.lighting.intensity ? 0 : 1,
+                      color: lighting.color || NORMAL_LIGHT,
+                      intensity: 0,
                     })
                   }
                 >
-                  {state.room.lighting.intensity ? 'Lights off' : 'Lights on'}
+                  Lights off
                 </Button>
               </Popover>
             )}
@@ -668,7 +809,7 @@ export default function AlternateEncounter({
                 Speak
               </Button>
               {[
-                ['observe', 'Sensors', ScanLine],
+                ['observe', 'Check', ScanLine],
                 ['room', 'Room', Lightbulb],
                 ['ready', 'Ready', ShieldAlert],
                 ['devices', 'Use device', Zap],
@@ -713,13 +854,28 @@ export default function AlternateEncounter({
           <pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre>
         </Drawer>
       )}
+      {log && (
+        <LogDrawer
+          events={logEvents}
+          humanName="Visitor"
+          thinking={thinking}
+          onClose={() => setLog(false)}
+        />
+      )}
       {ended && (
         <EndScreen
-          summary={outcomeSummary(state, { perspective, role })}
+          summary={{
+            ...summary,
+            // The objective G-01 had to infer, revealed only now.
+            detail: guardPlayer ? visitorReveal(state, role) : undefined,
+          }}
+          onPlayAgain={onPlayAgain}
           onNewGame={() => {
             stop();
             onNew();
           }}
+          onReplay={onReplay}
+          onLog={() => setLog(true)}
         />
       )}
     </div>

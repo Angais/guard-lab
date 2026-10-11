@@ -7,20 +7,59 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const onnxBinaries = 'node_modules/onnxruntime-node/bin/napi-v3';
+
+// --- Main-process dependencies only ------------------------------------------------------
+// Vite bundles the renderer (React, Three.js, icons, fonts) into dist, so those are
+// devDependencies. Of the production graph, keep only what the main process can load from
+// package.json `dependencies`. The edges below are never followed at run time:
+// onnxruntime-node's install script fetches with global-agent and unpacks with tar;
+// transformers.js loads onnxruntime-web only in browsers; sharp's WebAssembly build is a
+// fallback for platforms without a native binary, and every package ships a native one.
+const NOT_LOADED = {
+  'onnxruntime-node': ['global-agent', 'tar'],
+  '@huggingface/transformers': ['onnxruntime-web'],
+  sharp: ['@img/sharp-wasm32'],
+};
+function unusedPackages(root = __dirname) {
+  const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+  const entries = lock.packages;
+  const resolve = (from, name) => {
+    for (let dir = from; ; dir = dir.slice(0, Math.max(0, dir.lastIndexOf('/node_modules/')))) {
+      const key = `${dir ? dir + '/' : ''}node_modules/${name}`;
+      if (entries[key]) return key;
+      if (!dir) return null;
+    }
+  };
+  const loaded = new Set();
+  const visit = (key) => {
+    // Optional platform packages that npm did not install for this machine stay unvisited.
+    if (!key || loaded.has(key) || !fs.existsSync(path.join(root, key))) return;
+    loaded.add(key);
+    const entry = entries[key];
+    const name = key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    for (const dependency of Object.keys({
+      ...entry.dependencies,
+      ...entry.optionalDependencies,
+    }))
+      if (!NOT_LOADED[name]?.includes(dependency)) visit(resolve(key, dependency));
+  };
+  for (const name of Object.keys(entries[''].dependencies || {})) visit(`node_modules/${name}`);
+  return Object.keys(entries).filter(
+    (key) => key && !entries[key].dev && !loaded.has(key) && fs.existsSync(path.join(root, key)),
+  );
+}
+
 const files = [
   'dist/**/*',
   'electron/**/*',
   'shared/**/*',
   'package.json',
-  'LICENSE',
-  'THIRD_PARTY.md',
-  // electron-builder's glob treats '*' as one path segment; use an explicit docs tree glob
-  // so license files (including their .md suffix) land in every desktop package.
-  'docs/**/*-LICENSE.md',
-  // Browser builds, sources and maps the Node speech runtime never loads.
-  '!node_modules/onnxruntime-web/**',
+  // LICENSE, THIRD_PARTY.md and docs/*-LICENSE.md ship visibly as extraResources (below).
+  // Browser builds, sources, type declarations and maps the Node speech runtime never loads.
+  '!**/*.{map,ts}',
+  '!node_modules/onnxruntime-node/script/**',
+  ...unusedPackages().map((key) => `!${key}/**`),
   '!node_modules/@huggingface/transformers/{src,types}/**',
-  '!node_modules/@huggingface/transformers/dist/*.map',
   '!node_modules/@huggingface/transformers/dist/ort-wasm*',
   '!node_modules/@huggingface/transformers/dist/transformers.{js,min.js,web.js,web.min.js}',
   '!node_modules/@huggingface/transformers/dist/transformers.node.min.*',
@@ -169,11 +208,13 @@ async function bundleWindowsRuntime(context) {
   const names = new Set([...needs.values()].flatMap((set) => [...set]).sort());
   const runtime = PE_MACHINES[arch] && findRuntime(arch, names);
   if (!runtime) {
-    console.warn(
-      `  • Guard Lab: Visual C++ runtime for ${arch} not found (${[...names].join(', ')}). ` +
-        'Local speech will need the Microsoft Visual C++ Redistributable on the target PC. ' +
-        'Build on Windows with Visual Studio Build Tools, or set GUARD_LAB_VC_RUNTIME_DIR.',
-    );
+    const message =
+      `Visual C++ runtime for ${arch} not found (${[...names].join(', ')}). ` +
+      'Local speech will need the Microsoft Visual C++ Redistributable on the target PC. ' +
+      'Build on Windows with Visual Studio Build Tools, or set GUARD_LAB_VC_RUNTIME_DIR.';
+    // Release builds (desktop-build.yml) must not ship a package whose voices cannot load.
+    if (process.env.GUARD_LAB_REQUIRE_VC_RUNTIME) throw new Error(message);
+    console.warn(`  • Guard Lab: ${message}`);
     return;
   }
   for (const [dir, wanted] of needs)
@@ -186,11 +227,63 @@ async function bundleWindowsRuntime(context) {
   );
 }
 
+// --- Visible license notices --------------------------------------------------------------
+// extraResources copies the license texts to a visible resources/licenses folder instead of
+// hiding them in app.asar. electron-builder strips package READMEs, and sharp's libvips README
+// is the only list of the libraries bundled in its shared library, so afterPack copies it too.
+function resourcesDirectory(context) {
+  if (context.electronPlatformName !== 'darwin') return path.join(context.appOutDir, 'resources');
+  const app = fs.existsSync(context.appOutDir)
+    ? fs.readdirSync(context.appOutDir).find((name) => name.endsWith('.app'))
+    : null;
+  return app ? path.join(context.appOutDir, app, 'Contents', 'Resources') : null;
+}
+
+function copyLibvipsNotices(context) {
+  const resources = resourcesDirectory(context);
+  if (!resources || !fs.existsSync(resources)) return;
+  const arch = typeof context.arch === 'number' ? ARCH_NAMES[context.arch] : context.arch;
+  const platform = context.electronPlatformName;
+  const notice = [`sharp-libvips-${platform}-${arch}`, `sharp-${platform}-${arch}`]
+    .map((name) => path.join(__dirname, 'node_modules', '@img', name, 'README.md'))
+    .find(
+      (file) => fs.existsSync(file) && /third-party libraries/.test(fs.readFileSync(file, 'utf8')),
+    );
+  if (!notice) {
+    console.warn(`  • Guard Lab: no libvips license list found for ${platform}-${arch}.`);
+    return;
+  }
+  fs.mkdirSync(path.join(resources, 'licenses'), { recursive: true });
+  fs.copyFileSync(notice, path.join(resources, 'licenses', 'libvips-NOTICES.md'));
+}
+
+async function afterPack(context) {
+  await bundleWindowsRuntime(context);
+  copyLibvipsNotices(context);
+}
+
+// Ad-hoc signing gives the macOS app a valid signature that covers the renamed bundle, so a
+// downloaded copy opens through Privacy & Security → Open Anyway instead of being reported as
+// damaged. With CSC_LINK or CSC_NAME, sign with that Developer ID and hardened runtime; the
+// entitlements keep Electron's JIT and the push-to-talk microphone working under it.
+const developerId = Boolean(process.env.CSC_LINK || process.env.CSC_NAME);
+
 module.exports = {
   appId: 'lab.guard.desktop',
   productName: 'Guard Lab',
   directories: { output: 'release' },
+  // No auto-updater: skip app-update.yml/latest*.yml, which would embed the Git remote.
+  publish: null,
   files,
+  extraResources: [
+    { from: 'LICENSE', to: 'licenses/LICENSE.txt' },
+    { from: 'THIRD_PARTY.md', to: 'licenses/THIRD_PARTY.md' },
+    { from: 'docs', to: 'licenses', filter: ['*-LICENSE.md'] },
+    // Upstream notices the release workflow fetches (ONNX Runtime's ThirdPartyNotices).
+    ...(fs.existsSync(path.join(__dirname, '.cache', 'licenses'))
+      ? [{ from: '.cache/licenses', to: 'licenses' }]
+      : []),
+  ],
   asar: true,
   asarUnpack: [
     'node_modules/onnxruntime-node/**',
@@ -198,16 +291,29 @@ module.exports = {
     'node_modules/sharp/**',
     'node_modules/@img/**',
   ],
+  // The interface, voices and speech recognition are English only.
+  electronLanguages: ['en'],
   // Native dependencies ship N-API prebuilds; nothing needs compiling for Electron.
   npmRebuild: false,
-  afterPack: bundleWindowsRuntime,
+  afterPack,
   icon: 'public/icon.png',
-  win: { target: ['portable'], signExecutable: false, files: filesFor('win32') },
-  portable: { artifactName: 'Guard-Lab-${version}-${arch}.exe' },
+  // The zip is an unpacked folder that starts instantly. The portable .exe is a single file
+  // that extracts the whole app to a temporary folder on every launch.
+  win: {
+    target: ['zip', 'portable'],
+    signExecutable: false,
+    files: filesFor('win32'),
+    artifactName: 'Guard-Lab-${version}-Windows-${arch}.${ext}',
+  },
+  portable: { artifactName: 'Guard-Lab-${version}-Windows-${arch}-portable.${ext}' },
   mac: {
     target: ['zip'],
     category: 'public.app-category.games',
     files: filesFor('darwin'),
+    artifactName: 'Guard-Lab-${version}-macOS-${arch}.${ext}',
+    ...(developerId ? { hardenedRuntime: true } : { identity: '-', hardenedRuntime: false }),
+    entitlements: 'build/entitlements.mac.plist',
+    entitlementsInherit: 'build/entitlements.mac.plist',
     extendInfo: {
       NSMicrophoneUsageDescription:
         'Guard Lab uses your microphone only while you hold the push-to-talk key, to turn your voice into text on this device.',
@@ -222,6 +328,7 @@ module.exports = {
       ...filesFor('linux'),
       `!${onnxBinaries}/linux/*/libonnxruntime_providers_{cuda,tensorrt}.so`,
     ],
+    // AppImage names x64 as x86_64.
+    artifactName: 'Guard-Lab-${version}-Linux-${arch}.${ext}',
   },
-  artifactName: 'Guard-Lab-${version}-${os}-${arch}.${ext}',
 };

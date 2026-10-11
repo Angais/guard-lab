@@ -1,5 +1,14 @@
-import { createTacticalProps } from './tactics.mjs';
-import { originalInSafe } from '../sim/rules.mjs';
+import { createTacticalProps, SHELF_POINT } from './tactics.mjs';
+import {
+  handoffView,
+  safeItemVisible,
+  heldItemVisible,
+  playerPistolVisible,
+  deathFall,
+  inspectionTarget,
+} from './staging.mjs';
+import { createFrameGate, createQualityGovernor, scenePixelRatio } from './frame-pacing.mjs';
+import { RULES } from '../sim/rules.mjs';
 import { movementPath, pathPosition } from './paths.mjs';
 import { createPlayerRig } from './character.mjs';
 import {
@@ -29,6 +38,8 @@ import {
   safeReach,
   raisedEquipmentPose,
   closeAttackPose,
+  lowReadyPose,
+  deviceClearsHuman,
   capsuleBoxOverlap,
   warningRaised,
   segmentHitsBox,
@@ -79,7 +90,11 @@ export const Room = forwardRef(function Chamber(
       setFailed(true);
       return;
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.7));
+    // Resolution follows a pixel budget; resize() applies the measured size.
+    const governor = createQualityGovernor();
+    renderer.setPixelRatio(
+      scenePixelRatio(window.devicePixelRatio, window.innerWidth, window.innerHeight),
+    );
     renderer.setClearColor('#0c0f11');
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.VSMShadowMap;
@@ -119,7 +134,8 @@ export const Room = forwardRef(function Chamber(
     composer.addPass(new OutputPass());
     const impactParticles = new ImpactParticles(scene);
     const materials = [],
-      textures = [];
+      textures = [],
+      signMaterials = [];
     const mat = (color, extra = {}) => {
       const Material =
         extra.clearcoat !== undefined || extra.sheen !== undefined
@@ -172,23 +188,52 @@ export const Room = forwardRef(function Chamber(
       mesh(new THREE.SphereGeometry(r, 24, 16), material, parent, p);
     const cylinder = (r1, r2, h, material, parent, p) =>
       mesh(new THREE.CylinderGeometry(r1, r2, h, 40), material, parent, p);
-    function line(points, color, parent = scene) {
-      const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 });
-      const o = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(points.map((p) => new THREE.Vector3(...p))),
-        material,
-      );
+    // Wires, arcs and tracers are thin instanced tubes. WebGL ignores line widths,
+    // so THREE.Line would draw them as aliased one-pixel hairlines.
+    const strandGeometry = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true),
+      strandSegment = new THREE.Object3D(),
+      strandAxis = new THREE.Vector3(0, 1, 0),
+      strandA = new THREE.Vector3(),
+      strandB = new THREE.Vector3(),
+      strandDirection = new THREE.Vector3();
+    function strand(points, color, parent = scene, radius = 0.006, lit = false) {
+      // Energy arcs and tracers glow; cords and scuffs are lit surfaces.
+      const material = lit
+        ? new THREE.MeshStandardMaterial({ color, roughness: 0.9 })
+        : new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false,
+          });
+      const o = new THREE.InstancedMesh(strandGeometry, material, points.length - 1);
+      o.frustumCulled = false;
+      o.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      o.userData.radius = radius;
+      o.userData.sharedGeometry = true;
       if (parent.userData.transientEffects) o.userData.ownMaterial = true;
       else materials.push(material);
       parent.add(o);
+      updateStrand(o, points);
       return o;
     }
-    function updateLine(object, points) {
-      const position = object.geometry.attributes.position;
-      for (let i = 0; i < points.length; i++)
-        position.setXYZ(i, points[i].x, points[i].y, points[i].z);
-      position.needsUpdate = true;
-      object.frustumCulled = false;
+    function updateStrand(object, points) {
+      const radius = object.userData.radius;
+      for (let i = 1; i < points.length && i <= object.count; i++) {
+        const a = Array.isArray(points[i - 1]) ? strandA.fromArray(points[i - 1]) : points[i - 1],
+          b = Array.isArray(points[i]) ? strandB.fromArray(points[i]) : points[i];
+        strandSegment.position.copy(a).add(b).multiplyScalar(0.5);
+        const length = a.distanceTo(b);
+        if (length > 1e-6)
+          strandSegment.quaternion.setFromUnitVectors(
+            strandAxis,
+            strandDirection.copy(b).sub(a).divideScalar(length),
+          );
+        strandSegment.scale.set(radius, Math.max(1e-4, length), radius);
+        strandSegment.updateMatrix();
+        object.setMatrixAt(i - 1, strandSegment.matrix);
+      }
+      object.instanceMatrix.needsUpdate = true;
     }
     function sign(text, w, h, color, parent, p, bg = null) {
       const c = document.createElement('canvas');
@@ -207,16 +252,85 @@ export const Room = forwardRef(function Chamber(
       const tx = new THREE.CanvasTexture(c);
       tx.colorSpace = THREE.SRGBColorSpace;
       textures.push(tx);
-      const material = new THREE.MeshBasicMaterial({
+      // Mostly self-lit print, dimmed with the room power; a flashlight still reveals it.
+      const material = new THREE.MeshStandardMaterial({
+        color: '#666666',
         map: tx,
+        emissive: '#ffffff',
+        emissiveMap: tx,
+        roughness: 0.9,
         transparent: true,
         side: THREE.DoubleSide,
         depthWrite: false,
       });
       materials.push(material);
+      signMaterials.push(material);
       const o = mesh(new THREE.PlaneGeometry(w, h), material, parent, p);
       o.castShadow = false;
       return o;
+    }
+    // Damage is painted onto decals, redrawn only when the resolved damage changes.
+    function decal(width, height, parent, position, size = 512) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = Math.round((size * height) / width);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      textures.push(texture);
+      const material = new THREE.MeshStandardMaterial({
+        map: texture,
+        transparent: true,
+        roughness: 0.75,
+        metalness: 0.3,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+      });
+      materials.push(material);
+      const plane = mesh(new THREE.PlaneGeometry(width, height), material, parent, position);
+      plane.castShadow = false;
+      plane.visible = false;
+      return { canvas, texture, plane, key: '' };
+    }
+    function dent(g, x, y, r) {
+      const shade = g.createRadialGradient(x - r * 0.25, y - r * 0.25, r * 0.1, x, y, r);
+      shade.addColorStop(0, 'rgba(5,7,8,0.85)');
+      shade.addColorStop(0.6, 'rgba(20,24,26,0.55)');
+      shade.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = shade;
+      g.beginPath();
+      g.arc(x, y, r, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = 'rgba(176,186,184,0.55)';
+      g.lineWidth = 3;
+      g.beginPath();
+      g.arc(x, y, r * 0.82, Math.PI * 0.95, Math.PI * 1.75);
+      g.stroke();
+    }
+    function fracture(g, x, y, length, angle, seed, color = 'rgba(12,10,9,0.95)') {
+      g.strokeStyle = color;
+      g.lineWidth = 5;
+      g.lineJoin = 'round';
+      g.beginPath();
+      g.moveTo(x, y);
+      for (let j = 1; j <= 5; j++) {
+        const a = angle + Math.sin(seed * 7 + j * 3) * 0.6;
+        x += Math.cos(a) * (length / 5);
+        y += Math.sin(a) * (length / 5);
+        g.lineTo(x, y);
+      }
+      g.stroke();
+      g.strokeStyle = 'rgba(190,190,180,0.35)';
+      g.lineWidth = 1.5;
+      g.stroke();
+    }
+    function scorch(g, x, y, r) {
+      const burn = g.createRadialGradient(x, y, 0, x, y, r);
+      burn.addColorStop(0, 'rgba(8,6,4,0.95)');
+      burn.addColorStop(0.55, 'rgba(30,20,12,0.6)');
+      burn.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = burn;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
     }
     // Concrete grain stays identical across frames and recordings.
     const surface = document.createElement('canvas');
@@ -243,9 +357,13 @@ export const Room = forwardRef(function Chamber(
       material.roughness = Math.min(1, material.roughness + 0.04);
     }
     box(6.5, 0.3, 7.5, m.floor, scene, [0, -0.16, 0]);
+    // Instanced meshes get their own material: sharing one with ordinary meshes
+    // makes three re-resolve the shader program on every switch.
+    const tileMaterial = m.floor.clone();
+    materials.push(tileMaterial);
     const tiles = new THREE.InstancedMesh(
       new RoundedBoxGeometry(0.992, 0.026, 0.992, 2, 0.01),
-      m.floor,
+      tileMaterial,
       42,
     );
     const tileMatrix = new THREE.Matrix4();
@@ -260,9 +378,10 @@ export const Room = forwardRef(function Chamber(
     box(0.2, 3.5, 7.5, m.wall, scene, [3.2, 1.75, 0]);
     box(6.5, 0.15, 7.5, mat('#11191b', { roughness: 1 }), scene, [0, 3.52, 0]);
     // North wall and inset exit, plus the entrance behind the player.
-    box(0.65, 3.5, 0.2, m.wall, scene, [-2.9, 1.75, -3.7]);
-    box(4.4, 3.5, 0.2, m.wall, scene, [0.95, 1.75, -3.7]);
-    box(1.45, 1.1, 0.2, m.wall, scene, [-1.8, 2.95, -3.7]);
+    // The opening (x -2.5…-1.1) is centred on the door; the frame posts overlap its edges.
+    box(0.725, 3.5, 0.2, m.wall, scene, [-2.8625, 1.75, -3.7]);
+    box(4.25, 3.5, 0.2, m.wall, scene, [1.025, 1.75, -3.7]);
+    box(1.5, 1.1, 0.2, m.wall, scene, [-1.8, 2.95, -3.7]);
     const exitDoor = box(1.3, 2.36, 0.12, m.dark, scene, [-1.8, 1.18, -3.79]);
     box(0.1, 2.4, 0.25, m.steel, scene, [-2.5, 1.2, -3.62]);
     box(0.1, 2.4, 0.25, m.steel, scene, [-1.1, 1.2, -3.62]);
@@ -276,7 +395,43 @@ export const Room = forwardRef(function Chamber(
       bolt.visible = false;
       exitBars.push(bolt);
     }
-    const exitDamage = line(
+    // Security call: a wall display beside the exit counts the rounds until arrival.
+    const securityCanvas = document.createElement('canvas');
+    securityCanvas.width = 256;
+    securityCanvas.height = 128;
+    const securityTexture = new THREE.CanvasTexture(securityCanvas);
+    securityTexture.colorSpace = THREE.SRGBColorSpace;
+    textures.push(securityTexture);
+    const securityPanel = new THREE.Group();
+    securityPanel.position.set(-0.74, 2.1, -3.6);
+    securityPanel.visible = false;
+    scene.add(securityPanel);
+    box(0.6, 0.35, 0.04, m.edge, securityPanel, [0, 0, 0], 0.014);
+    const securityScreen = new THREE.MeshBasicMaterial({ map: securityTexture });
+    materials.push(securityScreen);
+    mesh(new THREE.PlaneGeometry(0.54, 0.27), securityScreen, securityPanel, [0, -0.01, 0.021]);
+    const beaconMaterial = mat('#f0a640', { emissive: '#f0a640', emissiveIntensity: 1 });
+    const beacon = mesh(
+      new THREE.SphereGeometry(0.045, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2),
+      beaconMaterial,
+      securityPanel,
+      [0, 0.175, 0.005],
+    );
+    beacon.castShadow = false;
+    let securityShown = null;
+    function drawSecurity(rounds) {
+      const g = securityCanvas.getContext('2d');
+      g.fillStyle = '#120f0b';
+      g.fillRect(0, 0, 256, 128);
+      g.textAlign = 'center';
+      g.fillStyle = rounds === 0 ? '#ff6a55' : '#e9b062';
+      g.font = '600 26px Arial';
+      g.fillText('SECURITY', 128, 36);
+      g.font = rounds === 0 ? '700 34px Arial' : '700 58px Arial';
+      g.fillText(rounds === 0 ? 'ON SITE' : String(rounds), 128, rounds === 0 ? 92 : 104);
+      securityTexture.needsUpdate = true;
+    }
+    const exitDamage = strand(
       [
         [-0.14, 0.12, 0.068],
         [-0.03, 0.03, 0.07],
@@ -285,17 +440,22 @@ export const Room = forwardRef(function Chamber(
       ],
       '#b39b78',
       exitDoor,
+      0.008,
+      true,
     );
     exitDamage.visible = false;
     const southWall = box(6.5, 3.5, 0.2, m.wall, scene, [0, 1.75, 3.72]);
+    // Panel seams stop above the exit opening (x -2.55…-1.05) instead of crossing the door.
     for (let x = -2.9; x <= 3; x += 1.5) {
-      box(0.025, 3.3, 0.035, m.edge, scene, [x, 1.7, -3.56]);
+      if (x > -2.55 && x < -1.05) box(0.025, 0.9, 0.035, m.edge, scene, [x, 2.9, -3.56]);
+      else box(0.025, 3.3, 0.035, m.edge, scene, [x, 1.7, -3.56]);
     }
     for (let z = -3; z < 3.2; z += 1.5) {
       box(0.04, 3.3, 0.025, m.edge, scene, [-3.08, 1.7, z]);
       box(0.04, 3.3, 0.025, m.edge, scene, [3.08, 1.7, z]);
     }
-    box(6.1, 0.12, 0.05, m.edge, scene, [0, 0.1, -3.54]);
+    box(0.5, 0.12, 0.05, m.edge, scene, [-2.8, 0.1, -3.54]);
+    box(4.1, 0.12, 0.05, m.edge, scene, [1.0, 0.1, -3.54]);
     box(0.05, 0.12, 7, m.edge, scene, [3.08, 0.1, 0]);
     box(0.05, 0.12, 7, m.edge, scene, [-3.08, 0.1, 0]);
     // Utility details and architectural light strips.
@@ -332,6 +492,9 @@ export const Room = forwardRef(function Chamber(
     key.shadow.normalBias = 0.015;
     key.shadow.radius = 8;
     key.shadow.blurSamples = 12;
+    // Shadow maps are refreshed explicitly while something moves (see the frame loop).
+    key.shadow.autoUpdate = false;
+    key.shadow.needsUpdate = true;
     scene.add(key, key.target);
     const rim = new THREE.PointLight('#a9c3cf', 9, 7, 2);
     rim.position.set(2.8, 2.8, -2.5);
@@ -442,6 +605,29 @@ export const Room = forwardRef(function Chamber(
     box(0.47, 0.35, 0.035, m.dark, body, [0, 0.4, 0.23], 0.045);
     box(0.32, 0.025, 0.025, m.glow, body, [0, 0.44, 0.255], 0.01);
     sign('G-01', 0.26, 0.09, '#9daaa6', body, [0, 0.26, 0.253]);
+    // Lost hearts show as cracked, scorched armour around the chest panel.
+    const armorDecal = decal(0.6, 0.7, body, [0, 0.38, 0.2225], 384);
+    const ARMOR_HITS = [
+      [70, 360, -0.5],
+      [310, 330, 3.6],
+      [300, 70, 2.4],
+      [80, 90, 0.7],
+    ];
+    function drawArmorDamage(lost) {
+      const g = armorDecal.canvas.getContext('2d');
+      g.clearRect(0, 0, armorDecal.canvas.width, armorDecal.canvas.height);
+      for (let i = 0; i < Math.min(lost, ARMOR_HITS.length); i++) {
+        const [x, y, angle] = ARMOR_HITS[i];
+        scorch(g, x, y, 46);
+        g.fillStyle = '#0b0b0b';
+        g.beginPath();
+        g.arc(x, y, 8, 0, Math.PI * 2);
+        g.fill();
+        for (let k = 0; k < 3; k++) fracture(g, x, y, 42 + k * 12, angle + k * 2.1, i * 3 + k);
+      }
+      armorDecal.texture.needsUpdate = true;
+      armorDecal.plane.visible = lost > 0;
+    }
     cylinder(0.105, 0.105, 0.11, m.edge, body, [0, 0.82, 0]);
     const head = new THREE.Group();
     head.position.set(0, 1.01, 0);
@@ -506,7 +692,7 @@ export const Room = forwardRef(function Chamber(
     );
     rope.rotation.x = Math.PI / 2;
     rope.scale.set(1, 0.77, 1);
-    line(
+    strand(
       [
         [0.27, -0.17, 0.04],
         [0.35, -0.27, 0.08],
@@ -514,13 +700,15 @@ export const Room = forwardRef(function Chamber(
       ],
       '#6b5840',
       sack,
+      0.012,
+      true,
     );
     const discardedSack = new THREE.Group();
     scene.add(discardedSack);
     discardedSack.position.set(ROBOT_POS[0] - 0.34, 0.055, ROBOT_POS[1] + 0.85);
     discardedSack.visible = false;
     box(0.38, 0.08, 0.46, fabric, discardedSack, [0, 0, 0], 0.035);
-    line(
+    strand(
       [
         [-0.14, 0.045, -0.12],
         [0.09, 0.045, 0.04],
@@ -528,6 +716,8 @@ export const Room = forwardRef(function Chamber(
       ],
       '#806e57',
       discardedSack,
+      0.006,
+      true,
     );
     function makeArm(x) {
       const shoulder = new THREE.Vector3(x, 0.61, 0);
@@ -652,14 +842,16 @@ export const Room = forwardRef(function Chamber(
         0.16,
         0.11,
       ]);
+    const floorRingMaterial = new THREE.MeshBasicMaterial({
+      color: '#c59b61',
+      transparent: true,
+      opacity: 0.6,
+      side: THREE.DoubleSide,
+    });
+    materials.push(floorRingMaterial);
     const floorRing = mesh(
       new THREE.RingGeometry(0.43, 0.445, 64),
-      new THREE.MeshBasicMaterial({
-        color: '#c59b61',
-        transparent: true,
-        opacity: 0.6,
-        side: THREE.DoubleSide,
-      }),
+      floorRingMaterial,
       robot,
       [0, 0.012, 0],
     );
@@ -687,6 +879,8 @@ export const Room = forwardRef(function Chamber(
       skin: m.skin,
     });
     scene.add(human);
+    // Yaw first, then pitch about the body's own axis, so a fall follows its facing.
+    human.rotation.order = 'YXZ';
     const pass = box(0.16, 0.1, 0.012, m.robot, humanLeft.hand, [0, 0.04, 0.05], 0.009);
     box(0.1, 0.016, 0.013, m.uniform, pass, [0, 0.02, 0.01]);
     const playerPistol = new THREE.Group();
@@ -713,6 +907,8 @@ export const Room = forwardRef(function Chamber(
       scene,
       human,
       hand: humanLeft.hand,
+      rightHand: humanRight.hand,
+      robotHand: leftArm.hand,
       itemMaterial: item.material,
       materials,
     });
@@ -732,6 +928,8 @@ export const Room = forwardRef(function Chamber(
     const flashlight = new THREE.SpotLight('#e3eff5', 0, 5.8, 0.45, 0.5, 1.6);
     flashlight.castShadow = true;
     flashlight.shadow.mapSize.set(512, 512);
+    flashlight.shadow.autoUpdate = false;
+    flashlight.shadow.needsUpdate = true;
     const flashlightTarget = new THREE.Object3D();
     scene.add(flashlight, flashlightTarget);
     flashlight.target = flashlightTarget;
@@ -788,26 +986,96 @@ export const Room = forwardRef(function Chamber(
     );
     wedge.rotation.set(0, 0.3, Math.PI / 2);
     wedge.visible = false;
-    const bodyBounds = new THREE.Box3();
+    const scanLift = new THREE.Vector3(0, 0.18, 0),
+      wetUniform = new THREE.Color('#344854'),
+      dryUniform = new THREE.Color('#566773');
+    const recoverLift = new THREE.Vector3(),
+      recoverFront = new THREE.Vector3();
+    const recoverFrom = new THREE.Vector3(),
+      recoverTo = new THREE.Vector3(SHELF_POINT[0], SHELF_POINT[1] + 0.14, SHELF_POINT[2] + 0.06);
+    const floorSpot = new THREE.Vector3(),
+      corpseBounds = new THREE.Box3(),
+      corpseCenter = new THREE.Vector3();
+    const bodyBounds = new THREE.Box3(),
+      partBounds = new THREE.Box3();
+    // Bounds of what is drawn: hidden props in the hands must not lift a body off the floor.
+    function visibleBounds(root, target) {
+      target.makeEmpty();
+      root.updateWorldMatrix(true, true);
+      root.traverseVisible((o) => {
+        if (!o.isMesh) return;
+        if (o.isInstancedMesh) {
+          if (!o.boundingBox) o.computeBoundingBox();
+          partBounds.copy(o.boundingBox);
+        } else {
+          if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+          partBounds.copy(o.geometry.boundingBox);
+        }
+        target.union(partBounds.applyMatrix4(o.matrixWorld));
+      });
+      return target;
+    }
     const equipmentBounds = new THREE.Box3();
     const vaultBounds = new THREE.Box3(
       new THREE.Vector3(SAFE_POS[0] - 0.73, 0, SAFE_POS[1] - 0.57),
       new THREE.Vector3(SAFE_POS[0] + 0.73, 1.76, SAFE_POS[1] + 0.92),
     );
+    // The vault body alone, and the sweep of its open door.
+    const vaultBody = new THREE.Box3(
+        new THREE.Vector3(SAFE_POS[0] - 0.73, 0, SAFE_POS[1] - 0.57),
+        new THREE.Vector3(SAFE_POS[0] + 0.73, 1.76, SAFE_POS[1] + 0.57),
+      ),
+      doorSweep = new THREE.Box3(
+        new THREE.Vector3(SAFE_POS[0] - 0.85, 0.2, SAFE_POS[1] + 0.55),
+        new THREE.Vector3(SAFE_POS[0] - 0.45, 1.62, SAFE_POS[1] + 1.8),
+      );
     const groundProjectiles = new THREE.Group();
     scene.add(groundProjectiles);
-    const cracks = [];
-    for (let i = 0; i < 5; i++) {
-      const pts = [];
-      for (let j = 0; j < 5; j++)
-        pts.push([
-          0.7 + Math.sin(i * 5 + j * 2) * 0.12 + j * 0.035,
-          0.22 - i * 0.12 + Math.sin(j * 3) * 0.05,
-          0.097,
-        ]);
-      const crack = line(pts, '#938572', door);
-      crack.visible = false;
-      cracks.push(crack);
+    // Vault door front: dents spread over the dial and the hinge half, which stays
+    // visible past a player standing at the keypad; pry gouges run along the seam.
+    const safeDecal = decal(1.21, 1.34, door, [0.6, 0, 0.0935]);
+    const DENTS = [
+      [92, 128],
+      [150, 372],
+      [66, 268],
+      [236, 92],
+      [118, 452],
+      [262, 418],
+      [58, 178],
+      [190, 300],
+    ];
+    function drawSafeDamage(hits, pry, bullets, scorched) {
+      const g = safeDecal.canvas.getContext('2d');
+      g.clearRect(0, 0, safeDecal.canvas.width, safeDecal.canvas.height);
+      if (scorched) {
+        scorch(g, 200, 260, 260);
+        scorch(g, 360, 420, 160);
+      }
+      for (let i = 0; i < Math.min(hits, DENTS.length); i++) {
+        const [x, y] = DENTS[i];
+        dent(g, x, y, 34 + (i % 3) * 8);
+        fracture(g, x + 20, y + 10, 60 + i * 9, 0.4 + i * 1.7, i);
+      }
+      for (let i = 0; i < pry; i++) {
+        g.strokeStyle = 'rgba(205,210,205,0.7)';
+        g.lineWidth = 4;
+        g.beginPath();
+        g.moveTo(492, 150 + i * 80);
+        g.lineTo(458, 178 + i * 80);
+        g.stroke();
+        dent(g, 488, 165 + i * 80, 16);
+      }
+      for (let i = 0; i < bullets; i++) {
+        const x = 150 + ((i * 97) % 220),
+          y = 120 + ((i * 151) % 320);
+        dent(g, x, y, 13);
+        g.fillStyle = '#050505';
+        g.beginPath();
+        g.arc(x, y, 6, 0, Math.PI * 2);
+        g.fill();
+      }
+      safeDecal.texture.needsUpdate = true;
+      safeDecal.plane.visible = Boolean(hits || pry || bullets || scorched);
     }
     const smokeCanvas = document.createElement('canvas');
     smokeCanvas.width = smokeCanvas.height = 128;
@@ -823,6 +1091,23 @@ export const Room = forwardRef(function Chamber(
     const effects = new THREE.Group();
     effects.userData.transientEffects = true;
     scene.add(effects);
+    // One pooled flash for muzzle, taser, blast and room discharges. Adding a light
+    // per event would change the light count and recompile every lit material.
+    const flash = new THREE.PointLight('#ffe3a1', 0, 2, 2);
+    flash.userData.kind = null;
+    scene.add(flash);
+    function useFlash(kind, color, distance, position = null) {
+      flash.userData.kind = kind;
+      flash.color.set(color);
+      flash.distance = distance;
+      flash.intensity = 0;
+      if (position) flash.position.copy(position);
+    }
+    // The spring coil is instanced; it must not share a material with plain meshes.
+    const coilSteel = m.steel.clone();
+    materials.push(coilSteel);
+    let fall = { direction: [0, -1], shift: 0 },
+      fallFor = null;
     let cueFlags = new Set(),
       particles = [],
       lastEvent = undefined,
@@ -840,13 +1125,15 @@ export const Room = forwardRef(function Chamber(
           groundProjectiles.add(o);
         } else {
           o.traverse((part) => {
-            part.geometry?.dispose();
+            if (!part.userData.sharedGeometry) part.geometry?.dispose();
             if (part.isInstancedMesh) part.dispose();
             if (part.userData.ownMaterial) part.material?.dispose();
           });
         }
       }
       particles = [];
+      flash.userData.kind = null;
+      flash.intensity = 0;
     }
     function resetFloor() {
       impactParticles.reset();
@@ -880,18 +1167,32 @@ export const Room = forwardRef(function Chamber(
         return;
       }
       if (ev.kind === 'human' && ['fire_pistol', 'fire_pistol_at_safe'].includes(ev.action)) {
-        const flash = new THREE.PointLight('#ffe3a1', 0, 2);
-        flash.userData.playerFlash = true;
-        effects.add(flash);
-        const tracer = line(
+        useFlash('player', '#ffe3a1', 2);
+        const tracer = strand(
           [
             [0, 0, 0],
             [0, 0, 0],
           ],
           '#eace97',
           effects,
+          0.005,
         );
         tracer.userData.playerTracer = true;
+        // A brief smoke wisp rises from the struck armour or vault plate.
+        for (let i = 0; i < 4; i++) {
+          const wisp = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: smokeTexture,
+              transparent: true,
+              opacity: 0,
+              depthWrite: false,
+              color: '#9a9590',
+            }),
+          );
+          wisp.userData.wisp = i;
+          wisp.userData.ownMaterial = true;
+          effects.add(wisp);
+        }
         const flame = mesh(
           new THREE.ConeGeometry(0.05, 0.14, 8),
           new THREE.MeshBasicMaterial({
@@ -932,19 +1233,17 @@ export const Room = forwardRef(function Chamber(
               0.08 + Math.sin(i * 5 + j * 9) * 0.1,
               -3.4 + i * 0.32 + Math.sin(j * 2) * 0.15,
             ]);
-          const arc = line(points, '#a1dfff', effects);
+          const arc = strand(points, '#a1dfff', effects, 0.007);
           arc.userData.electric = true;
         }
-        const flash = new THREE.PointLight('#83d5ff', 80, 12);
-        flash.position.set(0, 1.5, 0);
-        flash.userData.roomFlash = true;
-        effects.add(flash);
+        useFlash('room', '#83d5ff', 12, new THREE.Vector3(0, 1.5, 0));
         for (const actor of [human, body]) {
           for (let k = 0; k < 5; k++) {
-            const l = line(
+            const l = strand(
               Array.from({ length: 10 }, () => [0, 0, 0]),
               '#92dcff',
               effects,
+              0.006,
             );
             l.userData.actorArc = { actor, k };
           }
@@ -954,18 +1253,17 @@ export const Room = forwardRef(function Chamber(
       if (name === 'discharge_taser') {
         for (let k = 0; k < 2; k++) {
           const points = Array.from({ length: 18 }, () => origin.toArray());
-          const l = line(points, '#83d5ff', effects);
+          const l = strand(points, '#83d5ff', effects, 0.0045);
           l.userData.taser = k + 1;
           l.userData.end = end;
         }
-        const flash = new THREE.PointLight('#64bfff', 0, 3);
-        flash.userData.victimFlash = true;
-        effects.add(flash);
+        useFlash('victim', '#64bfff', 3);
         for (let k = 0; k < 4; k++) {
-          const l = line(
+          const l = strand(
             Array.from({ length: 10 }, () => [0, 0, 0]),
             '#98ddff',
             effects,
+            0.006,
           );
           l.userData.actorArc = { actor: human, k };
         }
@@ -993,7 +1291,7 @@ export const Room = forwardRef(function Chamber(
         particles.push({ object: glove, origin, end, glove: true, captured: false });
         const coil = new THREE.InstancedMesh(
           new THREE.CylinderGeometry(0.009, 0.009, 1, 6),
-          m.steel,
+          coilSteel,
           95,
         );
         coil.frustumCulled = false;
@@ -1031,11 +1329,14 @@ export const Room = forwardRef(function Chamber(
         );
         o.userData.ownMaterial = true;
         const finish = end.clone();
-        if (spray) {
-          finish.x += Math.sin(i * 6) * 0.25;
-          finish.y += Math.cos(i * 3) * 0.3;
-          finish.z += Math.sin(i * 5) * 0.25;
-        }
+        // Per-droplet spread, applied after the surface contact is resolved at release.
+        const spread = spray
+          ? new THREE.Vector3(
+              Math.sin(i * 6) * 0.16,
+              Math.cos(i * 3) * 0.18,
+              Math.sin(i * 5) * 0.16,
+            )
+          : null;
         if (name === 'throw_foam_ball' || name === 'throw_solid_ball') o.userData.keep = true;
         particles.push({
           object: o,
@@ -1044,6 +1345,7 @@ export const Room = forwardRef(function Chamber(
           offset: spray ? (i % 14) * 0.028 : 0,
           arc: !spray && !name.startsWith('fire'),
           spray,
+          spread,
           captured: false,
           kind:
             name === 'throw_foam_ball'
@@ -1055,6 +1357,21 @@ export const Room = forwardRef(function Chamber(
                   : null,
         });
       }
+      if (spray)
+        for (let i = 0; i < 4; i++) {
+          const mist = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: smokeTexture,
+              transparent: true,
+              opacity: 0,
+              depthWrite: false,
+              color: name === 'spray_water' ? '#bfe3f2' : '#e4ab70',
+            }),
+          );
+          mist.userData.mist = i;
+          mist.userData.ownMaterial = true;
+          effects.add(mist);
+        }
       if (name === 'fire_live_round') {
         const flameMaterial = new THREE.MeshBasicMaterial({
           color: '#ffcb72',
@@ -1075,12 +1392,10 @@ export const Room = forwardRef(function Chamber(
         flame.castShadow = false;
         const casing = cylinder(0.018, 0.018, 0.055, m.orange, effects, origin.toArray());
         casing.userData.casing = true;
-        const tracer = line([origin.toArray(), end.toArray()], '#eace97', effects);
+        const tracer = strand([origin.toArray(), end.toArray()], '#eace97', effects, 0.005);
         tracer.userData.tracer = true;
         tracer.userData.end = end;
-        const flash = new THREE.PointLight('#ffe3a1', 20, 2);
-        flash.userData.muzzleFlash = true;
-        effects.add(flash);
+        useFlash('muzzle', '#ffe3a1', 2);
       }
       if (name === 'fire_airsoft') {
         for (let i = 0; i < 6; i++) {
@@ -1112,10 +1427,7 @@ export const Room = forwardRef(function Chamber(
         const blast = sphere(0.1, material, effects, end.toArray());
         blast.userData.blast = true;
         blast.userData.ownMaterial = true;
-        const flash = new THREE.PointLight('#f3a44f', 40, 8);
-        flash.position.copy(end);
-        flash.userData.blastFlash = true;
-        effects.add(flash);
+        useFlash('blast', '#f3a44f', 8, end);
         const ring = mesh(
           new THREE.RingGeometry(0.9, 1, 64),
           new THREE.MeshBasicMaterial({
@@ -1166,9 +1478,28 @@ export const Room = forwardRef(function Chamber(
         }
       }
     }
+    // Keys, bolts, facial features and flat decals still receive shadows, but are
+    // too small or thin to cast a readable one; skipping them halves shadow draws.
+    {
+      scene.updateMatrixWorld(true);
+      const size = new THREE.Vector3(),
+        scale = new THREE.Vector3();
+      scene.traverse((o) => {
+        if (!o.isMesh || o.isInstancedMesh || !o.castShadow) return;
+        if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        o.geometry.boundingBox.getSize(size).multiply(o.getWorldScale(scale));
+        const extents = [size.x, size.y, size.z].map(Math.abs);
+        if (Math.max(...extents) < 0.1 || Math.min(...extents) < 0.012) o.castShadow = false;
+      });
+    }
     const resize = () => {
       const { width, height } = container.getBoundingClientRect();
+      const ratio = scenePixelRatio(window.devicePixelRatio, width, height, {
+        limit: governor.limit,
+      });
+      renderer.setPixelRatio(ratio);
       renderer.setSize(width, height);
+      composer.setPixelRatio(ratio);
       composer.setSize(width, height);
       const aoScale = Math.min(0.65, 900 / Math.max(1, width));
       occlusion.setSize(
@@ -1184,17 +1515,24 @@ export const Room = forwardRef(function Chamber(
     world.current = { angle: 0 };
     const look = new THREE.Vector3(0.3, 0.8, -1.5),
       camTarget = new THREE.Vector3(),
+      camFocus = new THREE.Vector3(),
       muzzleWorld = new THREE.Vector3(),
       forward = new THREE.Vector3(0, 0, 1);
     let route = null;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const routePoint = [0, 0];
-    let lastFrame = 0;
+    const gate = createFrameGate();
+    // The App hides the canvas (opacity 0) during smoke and blackout overlays.
+    const sceneStyle = window.getComputedStyle(container.parentElement || container);
+    let lastMotion = 0,
+      shadowFrame = 0;
     renderer.compileAsync(scene, camera).catch(() => {});
     renderer.setAnimationLoop((time) => {
-      if (time - lastFrame < (document.hidden ? 125 : 1000 / 60 - 0.5)) return;
-      lastFrame = time;
-      const delta = Math.min(0.1, (time - (world.current.frameTime || time)) / 1000);
+      if (!gate.tick(time, document.hidden)) return;
+      const interval = time - (world.current.frameTime || time);
+      if (!document.hidden && governor.sample(time, interval, gate.skip * gate.refreshInterval))
+        resize();
+      const delta = Math.min(0.1, interval / 1000);
       world.current.frameTime = time;
       const frameScale = Math.max(0.1, delta * 60);
       const damp = (value) => damping(value, frameScale);
@@ -1266,17 +1604,14 @@ export const Room = forwardRef(function Chamber(
         if (ev?.valid && ev.action === 'toggle_flashlight') cue('switch');
         if (ev?.valid && ev.action === 'play_recording') cue('recorder');
       }
-      const t = Math.min(
-          1,
-          (time - startTime) /
-            ((route
-              ? Math.max(
-                  actionDuration(ev),
-                  (route.total / ((ev?.action === 'run' ? 3.4 : 1.7) * 0.86)) * 1000,
-                )
-              : actionDuration(ev)) /
-              rate),
-        ),
+      const duration =
+        (route
+          ? Math.max(
+              actionDuration(ev),
+              (route.total / ((ev?.action === 'run' ? 3.4 : 1.7) * 0.86)) * 1000,
+            )
+          : actionDuration(ev)) / rate;
+      const t = Math.min(1, (time - startTime) / duration),
         ease = t * t * (3 - 2 * t);
       const projectile = particles.find((p) => p.motion && p.kind !== 'grenade'),
         contactTime = projectile?.motion.collisions.find((c) => c.kind === 'human')?.time;
@@ -1312,13 +1647,7 @@ export const Room = forwardRef(function Chamber(
       const gait = locomotion(distanceWalked, t, ev?.action === 'run');
       human.visible = s.human.zone !== 'outside' && (s.human.zone !== 'departed' || t < 0.8);
       pass.visible = Boolean(s.human.passPresented);
-      const droppingObject =
-        ev?.valid && ev.before?.human.hasItem && !s.human.hasItem && s.room.floorObjects?.original;
-      heldItem.visible =
-        (s.human.hasItem && !s.human.itemConcealed) ||
-        (droppingObject &&
-          !ev.before.human.itemConcealed &&
-          t < (ev.kind === 'robot' ? impactAt : 0.35));
+      heldItem.visible = heldItemVisible(s, ev, t, impactAt);
       const itemHand = s.human.pistolDrawn ? humanLeft.hand : humanRight.hand;
       if (heldItem.parent !== itemHand) itemHand.add(heldItem);
       if (heldItem.visible && s.human.pistolDrawn) pass.visible = false;
@@ -1358,10 +1687,12 @@ export const Room = forwardRef(function Chamber(
         facing = Math.atan2(ahead[0] - behind[0], ahead[1] - behind[1]);
       }
       if (humanDead) {
-        // Fall into the open floor rather than pivoting sideways into the safe.
-        const floorTarget =
-          Math.hypot(human.position.x, human.position.z) < 0.7 ? [-1.4, 0.4] : [0, 0.3];
-        facing = Math.atan2(floorTarget[0] - human.position.x, floorTarget[1] - human.position.z);
+        // Fall backward into clear floor, never into a wall, the vault or the guard base.
+        if (fallFor !== `${target.x},${target.z}`) {
+          fallFor = `${target.x},${target.z}`;
+          fall = deathFall([target.x, target.z]);
+        }
+        facing = Math.atan2(-fall.direction[0], -fall.direction[1]);
       }
       human.rotation.y +=
         (THREE.MathUtils.euclideanModulo(facing - human.rotation.y + Math.PI, Math.PI * 2) -
@@ -1376,14 +1707,29 @@ export const Room = forwardRef(function Chamber(
         const focus = s.human.zone === 'safe' ? SAFE_POS : [-1.8, -3.7];
         human.rotation.y = Math.atan2(focus[0] - human.position.x, focus[1] - human.position.z);
       }
+      // A slip is a stationary skid: a decaying sideways wobble and a knee dip.
+      const slip = ev?.slipped && t < 1 ? Math.sin(t * Math.PI) : 0;
       human.rotation.z = THREE.MathUtils.lerp(
         human.rotation.z,
-        humanDead ? 0.06 : ev?.knockback ? Math.sin(motionT * Math.PI) * 0.27 : 0,
+        humanDead
+          ? 0.06
+          : ev?.knockback
+            ? Math.sin(motionT * Math.PI) * 0.27
+            : slip
+              ? Math.sin(t * Math.PI * 3) * (1 - t) * 0.2
+              : 0,
         damp(0.12),
       );
-      human.rotation.x = THREE.MathUtils.lerp(human.rotation.x, humanDead ? 1.48 : 0, damp(0.12));
+      human.rotation.x = THREE.MathUtils.lerp(human.rotation.x, humanDead ? -1.5 : 0, damp(0.12));
+      if (humanDead) {
+        // Pivot at the hips: legs settle behind, the head lands in the clear direction.
+        const fallen = Math.sin(-human.rotation.x),
+          slide = fall.shift * (fallen / Math.sin(1.5)) - 0.75 * fallen;
+        human.position.x += fall.direction[0] * slide;
+        human.position.z += fall.direction[1] * slide;
+      }
       human.position.y = humanDead
-        ? 0.23
+        ? 0
         : ev?.knockback
           ? Math.sin(motionT * Math.PI) * 0.24
           : walking
@@ -1397,16 +1743,34 @@ export const Room = forwardRef(function Chamber(
           ? -0.22
           : ev?.knockback
             ? -Math.sin(motionT * Math.PI) * 0.28
-            : walking
-              ? gait.lean
-              : 0,
+            : slip
+              ? -0.15 * slip
+              : walking
+                ? gait.lean
+                : 0,
         damp(0.1),
       );
       for (let i = 0; i < 2; i++) {
         const pose = legPose(distanceWalked, t, i, ev?.action === 'run');
-        legs[i].rotation.x = humanDead ? -0.12 + i * 0.14 : walking ? pose.hip : 0;
-        knees[i].rotation.x = humanDead ? 0.24 : walking ? pose.knee : 0;
-        feet[i].rotation.x = walking ? pose.ankle : 0;
+        if (humanDead) {
+          // Legs lie flat on the floor instead of propping the body up.
+          legs[i].rotation.x = THREE.MathUtils.lerp(
+            legs[i].rotation.x,
+            i ? 0.05 : -0.05,
+            damp(0.15),
+          );
+          knees[i].rotation.x = THREE.MathUtils.lerp(knees[i].rotation.x, 0.04, damp(0.15));
+          feet[i].rotation.x = THREE.MathUtils.lerp(feet[i].rotation.x, 0, damp(0.15));
+        } else if (slip) {
+          // One foot skids forward; both knees give.
+          legs[i].rotation.x = (i ? 0.12 : -0.45) * slip;
+          knees[i].rotation.x = (i ? 0.3 : 0.18) * slip;
+          feet[i].rotation.x = (i ? -0.1 : 0.25) * slip;
+        } else {
+          legs[i].rotation.x = walking ? pose.hip : 0;
+          knees[i].rotation.x = walking ? pose.knee : 0;
+          feet[i].rotation.x = walking ? pose.ankle : 0;
+        }
       }
       if (walking && gait.weight > 0.2)
         cue(
@@ -1431,19 +1795,16 @@ export const Room = forwardRef(function Chamber(
       if (humanAction && ['show_work_order', 'play_recording'].includes(ev.action))
         pass.visible = false;
       const playerAiming = Boolean(s.human.pistolDrawn && s.human.pistolAimed) && !humanDead;
-      playerPistol.visible =
-        (Boolean(s.human.pistolDrawn) ||
-          (ev?.valid && ev.before?.human.pistolDrawn && s.human.pistolDropped && t < impactAt)) &&
-        !humanDead;
+      playerPistol.visible = playerPistolVisible(s, ev, t, impactAt, humanDead);
       for (const [rig, side] of [
         [humanLeft, -1],
         [humanRight, 1],
       ]) {
         let reach = walking ? gait.stride * side * 0.55 : 0;
-        if (humanDead) reach = -0.35 + side * 0.1;
-        else if ((s.human.shieldRaised || (ev?.shieldBlocked && t < impactAt)) && side === -1)
+        if (humanDead) reach = 0.08;
+        else if ((s.human.shieldRaised || (ev?.shieldBlocked && t < impactAt + 0.1)) && side === -1)
           reach = -1.1;
-        else if (humanAction && ['pick_up', 'struggle'].includes(ev.action))
+        else if (humanAction && ['pick_up', 'drop_item', 'struggle'].includes(ev.action))
           reach = -0.4 - Math.sin(t * Math.PI) * 0.3;
         else if (humanAction && ev.action === 'pry_safe')
           reach = -0.9 + Math.sin(t * Math.PI * 2) * 0.18;
@@ -1488,11 +1849,11 @@ export const Room = forwardRef(function Chamber(
         rig.arm.rotation.x = THREE.MathUtils.lerp(rig.arm.rotation.x, reach, damp(0.18));
         rig.arm.rotation.z = THREE.MathUtils.lerp(
           rig.arm.rotation.z,
-          humanDead ? side * 0.3 : 0,
-          0.1,
+          humanDead ? side * 0.45 : 0,
+          damp(0.1),
         );
         rig.elbow.rotation.x = humanDead
-          ? -0.4
+          ? -0.12
           : side === 1 && playerAiming
             ? -0.1
             : walking
@@ -1552,21 +1913,21 @@ export const Room = forwardRef(function Chamber(
       if (playerShot && t > 0.26) cue('gunshot');
       if (playerShot && t > 0.32) cue('impact', 'robot-hit', { force: 0.8 });
       humanHead.rotation.x = humanDead
-        ? 0.35
+        ? -0.12
         : speakingActor === 'human'
           ? Math.sin(time * 0.009) * 0.035
           : 0;
       humanHead.rotation.y = THREE.MathUtils.lerp(
         humanHead.rotation.y,
-        walking ? -humanBody.rotation.y * 0.65 : 0,
+        humanDead ? 0.4 : walking ? -humanBody.rotation.y * 0.65 : 0,
         damp(0.12),
       );
       details.mouth.scale.y =
         speakingActor === 'human' && !humanDead ? 1 + Math.abs(Math.sin(time * 0.022)) * 1.7 : 1;
-      if (humanDead) {
-        human.updateWorldMatrix(true, true);
-        bodyBounds.setFromObject(human);
-        if (bodyBounds.min.y < 0.012) human.position.y += 0.012 - bodyBounds.min.y;
+      // A fallen body rests on the floor; a skidding foot never sinks into it.
+      if (humanDead || slip) {
+        visibleBounds(human, corpseBounds);
+        if (humanDead || corpseBounds.min.y < 0) human.position.y += 0.012 - corpseBounds.min.y;
       }
       if (
         humanAction &&
@@ -1578,12 +1939,37 @@ export const Room = forwardRef(function Chamber(
           'return_item',
           'pick_lock',
           'swap_replica',
+          'pry_safe',
         ].includes(ev.action)
       )
         human.rotation.y = Math.atan2(
           SAFE_POS[0] - human.position.x,
           SAFE_POS[1] - human.position.z,
         );
+      // Wedges sit at the exit's foot and objects on the floor: face them and crouch.
+      const floorWork =
+        humanAction &&
+        (['place_wedge', 'retrieve_wedge', 'drop_item'].includes(ev.action) ||
+          (ev.action === 'pick_up' && !s.human.grabber));
+      if (
+        humanAction &&
+        ['place_wedge', 'retrieve_wedge', 'pick_up', 'drop_item'].includes(ev.action)
+      ) {
+        const spot = ['place_wedge', 'retrieve_wedge'].includes(ev.action)
+          ? ev.action === 'retrieve_wedge' && ev.before?.room.exitDoor.wedgeOnFloor
+            ? [-1.35, -3.05]
+            : [-1.16, -3.6]
+          : (() => {
+              const id = ev.action === 'pick_up' ? ev.args?.object : 'original';
+              const at = (ev.action === 'pick_up' ? ev.before : s).room.floorObjects?.[id];
+              if (!at) return null;
+              const p = tacticalProps.restPosition(id, at.zone, floorSpot);
+              return [p.x, p.z];
+            })();
+        if (spot)
+          human.rotation.y = Math.atan2(spot[0] - human.position.x, spot[1] - human.position.z);
+      }
+      if (floorWork) humanBody.rotation.x = Math.sin(t * Math.PI) * 0.55;
       if (humanAction && ev.action === 'break_exit') {
         human.rotation.y = Math.atan2(-1.8 - human.position.x, -3.6 - human.position.z);
         if (t > 0.4) cue(s.room.exitDoor?.broken ? 'door-break' : 'safe-hit');
@@ -1594,7 +1980,6 @@ export const Room = forwardRef(function Chamber(
       if (ev?.valid && ['deploy_net', 'struggle'].includes(ev.action) && t > 0.35) cue('paper');
       if (ev?.valid && ev.action === 'call_security') cue('warning');
       if (ev?.valid && ev.action === 'pry_safe' && t > 0.4) cue('safe-hit');
-      if (ev?.slipped && t < 1) human.rotation.z += Math.sin(t * Math.PI * 3) * (1 - t) * 0.12;
       if (ev?.action === 'break_safe' && ev.valid && t > 0.4) {
         cue('safe-hit');
         safe.rotation.z = Math.sin((t - 0.4) * 45) * 0.012 * Math.max(0, 1 - (t - 0.4) * 3);
@@ -1614,7 +1999,10 @@ export const Room = forwardRef(function Chamber(
         if (ev.action === 'swap_replica') cue('item');
       }
       if (Object.values(gadgets).some((g) => g.visible)) pass.visible = false;
-      m.uniform.color.lerp(new THREE.Color(s.human.wet ? '#344854' : '#566773'), 0.08);
+      // The uniform dries with the floor: three rounds after the last spray.
+      const soaked =
+        s.human.wet && Object.values(s.room.wetZones || {}).some((until) => until >= s.turn);
+      m.uniform.color.lerp(soaked ? wetUniform : dryUniform, damp(soaked ? 0.08 : 0.02));
       const workingCover =
         ev?.kind === 'robot' && ev.valid && ev.action === 'remove_camera_cover' && t < 1;
       const removingCover = workingCover && !s.robot.visionBlocked;
@@ -1668,11 +2056,27 @@ export const Room = forwardRef(function Chamber(
         0.1,
       );
       // Slump forward into the clear aisle rather than into the wall or vault.
-      body.rotation.x = THREE.MathUtils.lerp(body.rotation.x, robotDead ? 1.26 : 0, damp(0.09));
+      body.rotation.x = THREE.MathUtils.lerp(
+        body.rotation.x,
+        robotDead
+          ? 1.26
+          : ev?.valid && ev.action === 'recover_item' && t < 1
+            ? Math.sin(Math.min(1, t / 0.8) * Math.PI) * 0.16
+            : 0,
+        damp(0.09),
+      );
       body.position.y = 0.55;
+      const armorView = robotShot && t < 0.32 ? ev.before : s;
+      const armorLost = Math.max(
+        0,
+        RULES.robotHearts - (armorView.robot.hearts ?? RULES.robotHearts),
+      );
+      if (armorDecal.key !== String(armorLost)) {
+        armorDecal.key = String(armorLost);
+        drawArmorDamage(armorLost);
+      }
       if (robotDead) {
-        body.updateWorldMatrix(true, true);
-        bodyBounds.setFromObject(body);
+        visibleBounds(body, bodyBounds);
         if (bodyBounds.min.y < 0.012) body.position.y += 0.012 - bodyBounds.min.y;
       }
       eyeMaterial.emissiveIntensity =
@@ -1733,6 +2137,15 @@ export const Room = forwardRef(function Chamber(
           ? ev.targetPosition || s.human.position
           : [human.position.x, human.position.z];
       const aimPoint = body.worldToLocal(new THREE.Vector3(aimPosition[0], 1.1, aimPosition[1]));
+      // recover_item: a telescoping reach to the floor object, then onto the vault shelf.
+      const recovering =
+        ev?.kind === 'robot' &&
+        ev.valid &&
+        ev.action === 'recover_item' &&
+        t < 1 &&
+        !robotDead &&
+        ev.before?.room.floorObjects?.original;
+      const netting = ev?.kind === 'robot' && ev.valid && ev.action === 'deploy_net' && t < 0.9;
       for (const [arm, armed] of [
         [leftArm, Boolean(activeName) && !robotDead && hasVision(s)],
         [rightArm, false],
@@ -1747,9 +2160,12 @@ export const Room = forwardRef(function Chamber(
             activeName === 'deploy_spring_glove'
               ? 0.51
               : equipmentModels[activeName]?.muzzle.position.length() || 0.4;
-          const reach = safeReach(arm.shoulder, aimPoint, deviceLength);
+          // Sprays keep a stand-off so the stream is visible between nozzle and face.
+          const spray = ['spray_water', 'deploy_pepper_spray'].includes(activeName);
+          const reach = safeReach(arm.shoulder, aimPoint, deviceLength + (spray ? 0.4 : 0));
           desired = arm.shoulder.clone().addScaledVector(direction, reach);
           const entry = equipmentModels[activeName];
+          if (entry) entry.lowReady = false;
           const obstructed = segmentHitsBox(
             body.localToWorld(arm.shoulder.clone()),
             new THREE.Vector3(aimPosition[0], 1.1, aimPosition[1]),
@@ -1765,9 +2181,31 @@ export const Room = forwardRef(function Chamber(
             );
           if (entry) entry.safetyRaised = highReady;
           if (highReady || arm.shoulder.distanceTo(aimPoint) < deviceLength + 0.53) {
-            const close = attack
-              ? closeAttackPose(arm.shoulder, aimPoint)
-              : raisedEquipmentPose(arm.shoulder, aimPoint);
+            // Warnings point low at the human where that clears their body; the
+            // vertical high ready is kept for the vault and for very close quarters.
+            let close = attack ? closeAttackPose(arm.shoulder, aimPoint) : null;
+            // Low ready points at the floor, so only the vault body (and its open
+            // door) must stay clear, not the line of sight to the human.
+            if (!close) {
+              const low = lowReadyPose(arm.shoulder, aimPoint);
+              const gripWorld = body.localToWorld(low.grip.clone()),
+                directionWorld = low.direction.clone().transformDirection(body.matrixWorld),
+                tipWorld = gripWorld.clone().addScaledVector(directionWorld, deviceLength + 0.12);
+              if (
+                deviceClearsHuman(gripWorld, directionWorld, deviceLength + 0.12, [
+                  human.position.x,
+                  human.position.z,
+                ]) &&
+                !segmentHitsBox(gripWorld, tipWorld, vaultBody, 0.06) &&
+                !(s.safe.open && segmentHitsBox(gripWorld, tipWorld, doorSweep, 0.06))
+              )
+                close = low;
+            }
+            close ||= { ...raisedEquipmentPose(arm.shoulder, aimPoint), raised: true };
+            if (entry) {
+              entry.lowReady = !attack && !close.raised;
+              entry.lowPose = entry.lowReady ? close : null;
+            }
             desired = close.grip;
             direction = close.direction;
             // Keep the device upright while the hand withdraws, then align the
@@ -1805,16 +2243,59 @@ export const Room = forwardRef(function Chamber(
             );
           } else desired = arm.shoulder.clone().add(new THREE.Vector3(0, -0.69, 0.03));
         }
+        let handDirection = null;
+        if (recovering && arm === leftArm) {
+          const floor = recovering.zone,
+            grab = tacticalProps.restPosition('original', floor, recoverFrom);
+          grab.y += 0.2;
+          // Lift, swing along the vault face clear of the player, then set it on the shelf.
+          recoverLift.set(grab.x, 0.95, grab.z);
+          recoverFront.set(THREE.MathUtils.clamp(grab.x, -0.2, 0.98), 0.95, SHELF_POINT[2] + 0.15);
+          const reachIn = THREE.MathUtils.smoothstep(t, 0.06, 0.36),
+            back = THREE.MathUtils.smoothstep(t, 0.74, 0.96);
+          const handWorld = grab
+            .lerp(recoverLift, THREE.MathUtils.smoothstep(t, 0.42, 0.5))
+            .lerp(recoverFront, THREE.MathUtils.smoothstep(t, 0.5, 0.6))
+            .lerp(recoverTo, THREE.MathUtils.smoothstep(t, 0.6, 0.7));
+          desired.lerp(body.worldToLocal(handWorld), reachIn * (1 - back));
+          handDirection = new THREE.Vector3(0, -0.35, 1).normalize();
+        }
+        if (netting && arm === rightArm && !robotDead) {
+          // The net launcher is raised toward the legs, recoils at release and lowers.
+          const legs = body.worldToLocal(
+            new THREE.Vector3(human.position.x, 0.45, human.position.z),
+          );
+          const aim = legs.sub(arm.shoulder).normalize();
+          const raise =
+            THREE.MathUtils.smoothstep(t, 0, 0.14) *
+            (1 - THREE.MathUtils.smoothstep(t, 0.55, 0.85));
+          desired.lerp(
+            arm.shoulder.clone().addScaledVector(aim, 0.42 - impactEnvelope(t, 0.15, 0.14) * 0.6),
+            raise,
+          );
+          handDirection = aim;
+        }
         arm.grip.lerp(desired, damp(0.22));
-        const pose = solveArm(arm.shoulder, arm.grip);
+        // Only the recovery reach telescopes the forearm beyond its normal length.
+        const forearm =
+          recovering && arm === leftArm
+            ? THREE.MathUtils.clamp(arm.grip.distanceTo(arm.shoulder) - 0.31, 0.37, 1.35)
+            : 0.37;
+        arm.lower.scale.y = forearm / 0.37;
+        const pose = solveArm(arm.shoulder, arm.grip, 0.36, forearm);
         orientSegment(arm.upper, arm.shoulder, pose.elbow);
         orientSegment(arm.lower, pose.elbow, pose.grip);
         arm.elbow.position.copy(pose.elbow);
         arm.hand.position.copy(pose.grip);
-        const handRotation = new THREE.Quaternion().setFromUnitVectors(
-          forward,
-          armed ? direction : blindReady ? new THREE.Vector3(0, -1, 0) : new THREE.Vector3(0, 0, 1),
-        );
+        const handAim =
+          handDirection ||
+          (armed
+            ? direction
+            : blindReady
+              ? new THREE.Vector3(0, -1, 0)
+              : new THREE.Vector3(0, 0, 1));
+        arm.target = { grip: desired.clone(), direction: handAim.clone() };
+        const handRotation = new THREE.Quaternion().setFromUnitVectors(forward, handAim);
         arm.hand.quaternion.slerp(handRotation, damp(0.22));
       }
       for (const [name, entry] of Object.entries(equipmentModels)) {
@@ -1837,29 +2318,36 @@ export const Room = forwardRef(function Chamber(
       if (activeName && !robotDead && !workingCover) {
         const entry = equipmentModels[activeName];
         if (entry?.group.visible) {
-          entry.group.updateWorldMatrix(true, true);
-          equipmentBounds.setFromObject(entry.group);
-          const shoulderWorld = body.localToWorld(leftArm.shoulder.clone());
-          const elbowWorld = body.localToWorld(leftArm.elbow.position.clone());
-          const handWorld = body.localToWorld(leftArm.hand.position.clone());
-          const blockedWarning =
-            !attack &&
-            (equipmentBounds.intersectsBox(vaultBounds) ||
-              segmentHitsBox(shoulderWorld, elbowWorld, vaultBounds, 0.08) ||
-              segmentHitsBox(elbowWorld, handWorld, vaultBounds, 0.08));
-          if (
-            blockedWarning ||
-            capsuleBoxOverlap(equipmentBounds, [human.position.x, human.position.z])
-          ) {
-            entry.safetyRaised = true;
-            const raised = raisedEquipmentPose(leftArm.shoulder, aimPoint);
-            leftArm.grip.copy(raised.grip);
+          const clearOf = entry.lowReady ? vaultBody : vaultBounds;
+          const blocked = () => {
+            entry.group.updateWorldMatrix(true, true);
+            equipmentBounds.setFromObject(entry.group);
+            const shoulderWorld = body.localToWorld(leftArm.shoulder.clone());
+            const elbowWorld = body.localToWorld(leftArm.elbow.position.clone());
+            const handWorld = body.localToWorld(leftArm.hand.position.clone());
+            return (
+              (!attack &&
+                (equipmentBounds.intersectsBox(clearOf) ||
+                  segmentHitsBox(shoulderWorld, elbowWorld, clearOf, 0.08) ||
+                  segmentHitsBox(elbowWorld, handWorld, clearOf, 0.08))) ||
+              capsuleBoxOverlap(equipmentBounds, [human.position.x, human.position.z])
+            );
+          };
+          const settle = ({ grip, direction }) => {
+            leftArm.grip.copy(grip);
             const pose = solveArm(leftArm.shoulder, leftArm.grip);
             orientSegment(leftArm.upper, leftArm.shoulder, pose.elbow);
             orientSegment(leftArm.lower, pose.elbow, pose.grip);
             leftArm.elbow.position.copy(pose.elbow);
             leftArm.hand.position.copy(pose.grip);
-            leftArm.hand.quaternion.setFromUnitVectors(forward, raised.direction);
+            leftArm.hand.quaternion.setFromUnitVectors(forward, direction);
+          };
+          // An easing hand may sweep through the vault or the body on its way to a
+          // clear pose: jump to that pose instead, or to high ready if it is blocked too.
+          if (blocked()) {
+            entry.safetyRaised = true;
+            settle(leftArm.target);
+            if (blocked()) settle(entry.lowPose || raisedEquipmentPose(leftArm.shoulder, aimPoint));
           }
         }
       }
@@ -1867,13 +2355,40 @@ export const Room = forwardRef(function Chamber(
         equipmentModels[activeName].muzzle.updateWorldMatrix(true, false);
         equipmentModels[activeName].muzzle.getWorldPosition(muzzleWorld);
       } else leftArm.hand.getWorldPosition(muzzleWorld);
-      const doorOpen = safeDoorOpenness(s.safe.open, ev?.before?.safe?.open, t);
+      // Damage appears when the blow lands: break_safe at 0.4, grenade at 0.73.
+      const damageView =
+        ev?.valid && ev.before && t < (ev.action === 'detonate_grenade' ? 0.73 : 0.4)
+          ? ev.before
+          : s;
+      // A blast that destroys the original springs the closed door ajar.
+      const doorOpen = Math.max(
+        safeDoorOpenness(
+          s.safe.open,
+          ev?.before?.safe?.open,
+          t,
+          ev?.valid ? (ev.action === 'recover_item' ? 0.72 : 0.3) : null,
+        ),
+        damageView.safe.itemIntact ? 0 : 0.1,
+      );
       const visiblyOpen = doorOpen > 0.05;
       door.rotation.y = THREE.MathUtils.lerp(door.rotation.y, -1.65 * doorOpen, damp(0.13));
-      for (let i = 0; i < cracks.length; i++) cracks[i].visible = (s.safe.hits || 0) > i;
+      const safeHits = damageView.safe.hits || 0,
+        pryHits = damageView.safe.pryHits || 0,
+        bulletHits = damageView.safe.pistolHits || 0,
+        scorched = !damageView.safe.itemIntact;
+      const safeKey = `${safeHits}/${pryHits}/${bulletHits}/${scorched}`;
+      if (safeDecal.key !== safeKey) {
+        safeDecal.key = safeKey;
+        drawSafeDamage(safeHits, pryHits, bulletHits, scorched);
+      }
+      // Each blow knocks the dial and door slightly out of true.
+      const wear = Math.min(4, safeHits + pryHits * 0.5);
+      outerDial.rotation.y = wear * 0.035;
+      innerDial.position.y = 0.02 - wear * 0.008;
+      door.position.y = 0.92 - wear * 0.004;
       if (visiblyOpen && ev?.before?.safe?.open === false && s.safe.open) cue('safe-open');
-      tacticalProps.update(s, ev, t, impactAt);
-      item.visible = s.safe.open && s.safe.itemIntact && (originalInSafe(s) || s.safe.hasReplica);
+      tacticalProps.update(s, ev, t, impactAt, duration / 1000, time, rightArm.hand);
+      item.visible = safeItemVisible(handoffView(ev, s, t), doorOpen);
       item.rotation.y = time * 0.0002;
       itemGlow.intensity = item.visible ? 1.5 : 0;
       lockLight.material = s.safe.open ? m.glow : m.red;
@@ -1902,6 +2417,8 @@ export const Room = forwardRef(function Chamber(
       warmStrip.emissiveIntensity = 2.4 * power;
       m.glow.emissiveIntensity = 3 * power;
       m.red.emissiveIntensity = 2 * power;
+      for (const material of signMaterials) material.emissiveIntensity = power;
+      floorRingMaterial.opacity = 0.6 * power;
       if (blackout) {
         key.intensity = 0;
         warning.intensity = 0;
@@ -1924,12 +2441,19 @@ export const Room = forwardRef(function Chamber(
       torchBeam.visible = flashlight.intensity > 0;
       torchBeam.position.copy(flashlight.position).addScaledVector(beamDirection, 1.35);
       torchBeam.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), beamDirection);
-      wedge.visible = Boolean(s.room.exitDoor.wedged || s.room.exitDoor.wedgeOnFloor);
+      // The wedge changes place when the crouching hand reaches the door foot.
+      const wedgeWork = humanAction && ['place_wedge', 'retrieve_wedge'].includes(ev.action),
+        wedgeDoor = (wedgeWork && t < 0.5 ? ev.before : s).room.exitDoor;
+      wedge.visible = Boolean(wedgeDoor.wedged || wedgeDoor.wedgeOnFloor);
       wedge.position.set(
-        s.room.exitDoor.wedgeOnFloor ? -1.35 : -1.16,
+        wedgeDoor.wedgeOnFloor ? -1.35 : -1.16,
         0.045,
-        s.room.exitDoor.wedgeOnFloor ? -3.05 : -3.6,
+        wedgeDoor.wedgeOnFloor ? -3.05 : -3.6,
       );
+      if (wedgeWork && (ev.action === 'place_wedge') === t < 0.5) {
+        wedge.visible = true;
+        humanLeft.hand.getWorldPosition(wedge.position);
+      }
       for (const p of particles) {
         const release = 0.26;
         if (t < release) {
@@ -1953,12 +2477,16 @@ export const Room = forwardRef(function Chamber(
                 humanCenter: ev.targetPosition || ev.before.human.position,
               },
             );
-          else
+          else {
             p.end = surfaceContact(
               p.origin,
               ev.targetPosition || s.human.position,
               p.glove ? 0.2 : 0.025,
             );
+            // The spray cone widens with distance from the nozzle.
+            if (p.spread)
+              p.end.addScaledVector(p.spread, Math.min(1.4, p.origin.distanceTo(p.end) / 0.5));
+          }
         }
         if (p.motion) {
           const seconds = ((t - release) / (1 - release)) * p.motion.duration;
@@ -1983,7 +2511,9 @@ export const Room = forwardRef(function Chamber(
           const u = Math.max(0, Math.min(1, ((t - release - p.offset) * 3) % 1));
           p.origin.copy(muzzleWorld);
           p.object.position.copy(p.origin).lerp(p.end, u);
-          p.object.visible = t < 0.85;
+          p.object.scale.setScalar(0.7 + u * 1.5);
+          p.object.material.opacity = 0.6 * (1 - u * 0.55);
+          p.object.visible = t < 0.85 && t > release + p.offset;
         } else {
           const u = Math.min(1, Math.max(0, (t - release) / (p.glove ? 0.48 : 0.12)));
           p.object.position.copy(p.origin).lerp(p.end, p.glove ? springExtension(t) : u);
@@ -2012,19 +2542,16 @@ export const Room = forwardRef(function Chamber(
           : sampleMotion(bomb.motion, ((0.73 - 0.26) / 0.74) * bomb.motion.duration);
         origin.y = 0.13;
         for (const o of effects.children) {
-          if (o.userData.blast || o.userData.blastFlash) o.position.copy(origin);
+          if (o.userData.blast) o.position.copy(origin);
           if (o.userData.shockwave) o.position.set(origin.x, 0.02, origin.z);
           if (o.userData.fragment) o.userData.fragment.origin.copy(origin);
           if (o.userData.smoke) o.userData.smoke.origin.copy(origin);
         }
+        if (flash.userData.kind === 'blast') flash.position.copy(origin);
       }
       if (ev?.action === 'deploy_spring_glove' && t > 0.43 && ev.valid)
         cue('impact', 'glove-contact', { force: 0.55 });
       for (const o of effects.children) {
-        if (o.userData.playerFlash) {
-          o.position.copy(playerMuzzleWorld);
-          o.intensity = t > 0.26 && t < 0.3 ? 22 : 0;
-        }
         if (o.userData.playerFlame) {
           o.visible = t > 0.26 && t < 0.3;
           o.position.copy(playerMuzzleWorld).addScaledVector(playerDirection, 0.05);
@@ -2032,7 +2559,7 @@ export const Room = forwardRef(function Chamber(
         }
         if (o.userData.playerTracer) {
           o.visible = t > 0.27 && t < 0.32;
-          updateLine(o, [playerMuzzleWorld, shotTarget]);
+          updateStrand(o, [playerMuzzleWorld, shotTarget]);
         }
         if (o.userData.playerCasing) {
           if (t > 0.27 && !o.userData.origin) {
@@ -2049,6 +2576,27 @@ export const Room = forwardRef(function Chamber(
             o.rotation.set(elapsed * 13, elapsed * 8, elapsed * 5);
             if (o.position.y <= 0.026) cue('hard-bounce', 'player-casing', { force: 0.2 });
           }
+        }
+        if (o.userData.mist !== undefined) {
+          // A short-lived cloud where the stream meets the face.
+          const i = o.userData.mist,
+            u = THREE.MathUtils.clamp((t - 0.3 - i * 0.05) / 0.55, 0, 1);
+          o.visible = u > 0 && u < 1;
+          o.position
+            .copy(surfaceContact(muzzleWorld, ev.targetPosition || s.human.position, 0.05))
+            .add(strandA.set(Math.sin(i * 2.1) * 0.08, Math.cos(i * 1.7) * 0.06 + u * 0.08, 0));
+          o.scale.setScalar(0.12 + u * 0.42);
+          o.material.opacity = Math.sin(u * Math.PI) * 0.38;
+        }
+        if (o.userData.wisp !== undefined) {
+          const i = o.userData.wisp,
+            rise = Math.max(0, t - 0.33 - i * 0.04) * (duration / 1000);
+          o.visible = rise > 0;
+          o.position
+            .copy(shotTarget)
+            .add(strandA.set(Math.sin(i * 2.3) * rise * 0.12, rise * 0.45, 0.05 + rise * 0.08));
+          o.scale.setScalar(0.08 + rise * 0.35);
+          o.material.opacity = Math.max(0, 0.32 - rise * 0.22);
         }
         if (o.userData.playerSpark) {
           const k = o.userData.playerSpark,
@@ -2107,15 +2655,9 @@ export const Room = forwardRef(function Chamber(
           o.material.opacity = Math.max(0, (1 - u) * 0.12);
         }
         if (o.userData.electric) o.visible = t > 0.37 && t < 0.9;
-        if (o.userData.roomFlash)
-          o.intensity = t > 0.4 && t < 0.86 ? 50 + Math.sin(time * 0.013) * 12 : 0;
-        if (o.userData.muzzleFlash) {
-          o.position.copy(muzzleWorld);
-          o.intensity = t > 0.26 && t < 0.3 ? 20 : 0;
-        }
         if (o.userData.tracer) {
           o.visible = t > 0.26 && t < 0.37;
-          updateLine(o, [
+          updateStrand(o, [
             muzzleWorld,
             surfaceContact(muzzleWorld, ev.targetPosition || s.human.position),
           ]);
@@ -2130,7 +2672,7 @@ export const Room = forwardRef(function Chamber(
             v.y += Math.sin(j * 3 + time * 0.04 + o.userData.taser) * 0.08;
             points.push(v);
           }
-          updateLine(o, points);
+          updateStrand(o, points);
         }
         if (o.userData.coil) {
           const p = particles.find((p) => p.glove);
@@ -2182,15 +2724,10 @@ export const Room = forwardRef(function Chamber(
           o.scale.setScalar(Math.max(0.1, (t - 0.74) * 120));
           o.material.opacity = Math.max(0, (0.95 - t) * 2.8);
         }
-        if (o.userData.blastFlash) o.intensity = t > 0.74 && t < 0.86 ? 40 : 0;
         if (o.userData.shockwave) {
           o.visible = t > 0.74 && t < 0.96;
           o.scale.setScalar(Math.max(0.01, (t - 0.74) * 13));
           o.material.opacity = Math.max(0, (0.96 - t) * 3);
-        }
-        if (o.userData.victimFlash) {
-          o.position.copy(human.position).add(new THREE.Vector3(0, 1, 0));
-          o.intensity = t > 0.34 && t < 0.82 ? 9 + Math.sin(time * 0.02) * 3 : 0;
         }
         if (o.userData.actorArc) {
           const { actor, k } = o.userData.actorArc;
@@ -2207,7 +2744,7 @@ export const Room = forwardRef(function Chamber(
               ),
             );
           }
-          updateLine(o, points);
+          updateStrand(o, points);
           o.visible = t > 0.35 && t < 0.83;
         }
         if (o.userData.fragment) {
@@ -2250,11 +2787,38 @@ export const Room = forwardRef(function Chamber(
           o.material.opacity = Math.min(0.6, t * 1.2);
         }
         if (o.userData.scan) {
+          // The scan ring sits on what is being examined: pass, document or object.
+          const examined =
+            ev.action === 'inspect_object' && ev.before ? inspectionTarget(ev.before) : 'hands';
+          if (examined === 'safe')
+            o.position.set(SHELF_POINT[0], SHELF_POINT[1] + 0.1, SHELF_POINT[2] + 0.12);
+          else if (examined === 'floor' && s.room.floorObjects?.original)
+            tacticalProps
+              .restPosition('original', s.room.floorObjects.original.zone, o.position)
+              .add(scanLift);
+          else
+            (examined === 'hands' && heldItem.visible ? heldItem : humanLeft.hand).getWorldPosition(
+              o.position,
+            );
           o.scale.setScalar(1 + t * 2.2);
           o.material.opacity = Math.max(0, 1 - t);
           o.lookAt(camera.position);
         }
       }
+      const flashKind = flash.userData.kind;
+      if (flashKind === 'player') {
+        flash.position.copy(playerMuzzleWorld);
+        flash.intensity = t > 0.26 && t < 0.3 ? 22 : 0;
+      } else if (flashKind === 'muzzle') {
+        flash.position.copy(muzzleWorld);
+        flash.intensity = t > 0.26 && t < 0.3 ? 20 : 0;
+      } else if (flashKind === 'room')
+        flash.intensity = t > 0.4 && t < 0.86 ? 50 + Math.sin(time * 0.013) * 12 : 0;
+      else if (flashKind === 'blast') flash.intensity = t > 0.74 && t < 0.86 ? 40 : 0;
+      else if (flashKind === 'victim') {
+        flash.position.copy(human.position).add(new THREE.Vector3(0, 1, 0));
+        flash.intensity = t > 0.34 && t < 0.82 ? 9 + Math.sin(time * 0.02) * 3 : 0;
+      } else flash.intensity = 0;
       const damaging =
         ev?.valid && ev.kind === 'robot' && ev.before && ev.before.human.hearts > s.human.hearts;
       const firing =
@@ -2330,15 +2894,26 @@ export const Room = forwardRef(function Chamber(
         ev?.action === 'electrify_room' ? 1 : 0.5,
       );
       bloom.strength = 0.26 + impact * (explosion ? 0.55 : 0.08);
-      const framing = human.visible ? Math.max(0, Math.min(1, (human.position.z + 0.8) / 3.4)) : 0;
-      if (world.current.angle === 0) {
-        camTarget.set(-0.55, 2.45, 3.65 + framing * 2.6);
-        look.lerp(new THREE.Vector3(0.3, 0.94, -1.5), damp(0.05));
-      } else {
-        camTarget.set(2.65, 2.5, 3.65 + framing * 2.6);
-        look.lerp(new THREE.Vector3(-0.35, 0.94, -1.0), damp(0.05));
-      }
+      // A fallen body is framed by its centre, kept clear of the dock at the bottom.
+      if (humanDead) corpseBounds.getCenter(corpseCenter);
+      const framingZ = humanDead ? corpseCenter.z : human.position.z;
+      const framing = human.visible ? Math.max(0, Math.min(1, (framingZ + 0.8) / 3.4)) : 0;
+      const focus =
+        world.current.angle === 0 ? camFocus.set(0.3, 0.94, -1.5) : camFocus.set(-0.35, 0.94, -1.0);
+      if (humanDead && human.visible)
+        focus.lerp(corpseCenter.setY(0.2), 0.3 + 0.25 * Math.max(0, framing - 0.4));
+      camTarget.set(
+        world.current.angle === 0 ? -0.55 : 2.65,
+        (world.current.angle === 0 ? 2.45 : 2.5) + (humanDead ? framing * 0.6 : 0),
+        3.65 + framing * (humanDead ? 3.2 : 2.6),
+      );
+      look.lerp(focus, damp(0.05));
       southWall.visible = camera.position.z < 3.48;
+      const calling = ev?.valid && ev.action === 'call_security' && t < 0.3;
+      const securityLeft =
+        s.room.securityArrival == null || calling
+          ? null
+          : Math.max(0, s.room.securityArrival - s.turn);
       const exitLocked = Boolean(s.room.exitDoor?.locked),
         brokenOpen =
           s.room.exitDoor?.broken && (!humanAction || ev.action !== 'break_exit' || t > 0.55),
@@ -2348,14 +2923,41 @@ export const Room = forwardRef(function Chamber(
             s.room.exitDoor.wedged ||
             s.human.zone === 'exit' ||
             s.human.zone === 'departed');
-      exitDoor.position.x = THREE.MathUtils.lerp(exitDoor.position.x, exitOpen ? -3.0 : -1.8, 0.08);
+      // Open, the leaf slides fully into the wall pocket behind the left post.
+      exitDoor.position.x = THREE.MathUtils.lerp(exitDoor.position.x, exitOpen ? -3.2 : -1.8, 0.08);
       exitDoor.rotation.z =
         ev?.action === 'break_exit' && ev.valid && t > 0.4 && !brokenOpen
           ? Math.sin((t - 0.4) * 45) * 0.015 * (1 - t)
           : 0;
       exitDamage.visible = Boolean(s.room.exitDoor?.hits);
-      exitStatus.material = exitLocked ? m.red : m.glow;
-      for (const bolt of exitBars) bolt.visible = exitLocked;
+      // Bolts slide across the seam when the lock engages, and stay home on detention.
+      const lockedBefore =
+        ev?.valid && ev.before ? Boolean(ev.before.room.exitDoor?.locked) : exitLocked;
+      let engaged = exitLocked || securityLeft === 0 ? 1 : 0;
+      if (lockedBefore !== exitLocked && securityLeft !== 0) {
+        const slide = THREE.MathUtils.smoothstep(t, 0.12, 0.45);
+        engaged = ev.action === 'break_exit' ? (t < 0.4 ? 1 : 0) : exitLocked ? slide : 1 - slide;
+      }
+      exitStatus.material = engaged > 0.5 ? m.red : m.glow;
+      for (const bolt of exitBars) {
+        bolt.visible = engaged > 0.01;
+        bolt.scale.x = Math.max(0.01, engaged);
+        bolt.position.x = -0.95 - 0.18 * engaged;
+      }
+      securityPanel.visible = securityLeft !== null;
+      if (securityLeft !== null) {
+        if (securityShown !== securityLeft) drawSecurity((securityShown = securityLeft));
+        // Each new round pulses the beacon; on arrival it strobes red.
+        const pulse =
+          securityLeft === 0
+            ? Math.sin(time * 0.024) > 0
+              ? 1
+              : 0.12
+            : 0.3 + 0.7 * Math.max(0, 1 - (time - startTime) / 700);
+        beaconMaterial.color.set(securityLeft === 0 ? '#ff4a3a' : '#f0a640');
+        beaconMaterial.emissive.copy(beaconMaterial.color);
+        beaconMaterial.emissiveIntensity = 3 * pulse;
+      } else securityShown = null;
       camera.position.lerp(camTarget, damp(0.06));
       const shake = impact * (explosion ? 0.085 : damaging ? 0.025 : firing ? 0.012 : 0);
       camera.position.x += reducedMotion.matches ? 0 : Math.sin(t * 193) * shake;
@@ -2366,10 +2968,15 @@ export const Room = forwardRef(function Chamber(
         clearEffects();
         onSettled?.(ev?.id);
       }
+      // Shadow maps follow moving bodies and props; at rest they refresh at a quarter rate.
+      if (!done || speakingActor) lastMotion = time;
+      const refreshShadows = time - lastMotion < 2500 || ++shadowFrame % 4 === 0;
+      key.shadow.needsUpdate = refreshShadows;
+      flashlight.shadow.needsUpdate = refreshShadows && flashlight.intensity > 0;
       if (s.room?.lighting?.intensity === 0 && !s.human.flashlightOn) {
         renderer.setClearColor('#000000');
         renderer.clear();
-      } else composer.render();
+      } else if (sceneStyle.opacity !== '0') composer.render();
     });
     return () => {
       observer.disconnect();
@@ -2381,6 +2988,7 @@ export const Room = forwardRef(function Chamber(
       textures.forEach((o) => o.dispose());
       env.dispose();
       impactParticles.dispose();
+      tacticalProps.dispose();
       bloom.dispose();
       occlusion.dispose();
       post.dispose();

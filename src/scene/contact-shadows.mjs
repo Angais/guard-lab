@@ -10,6 +10,17 @@ export class ContactShadows extends GTAOPass {
     this.updatePdMaterial({ radius: 4, samples: 8 });
     this.blendIntensity = 0.85;
   }
+  // The scene pass has already refreshed this frame's shadow maps; the normal
+  // pass renders the scene again and must not redraw every shadow map.
+  render(renderer, writeBuffer, readBuffer, deltaTime, maskActive) {
+    const autoUpdate = renderer.shadowMap.autoUpdate;
+    renderer.shadowMap.autoUpdate = false;
+    try {
+      super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
+    } finally {
+      renderer.shadowMap.autoUpdate = autoUpdate;
+    }
+  }
   _overrideVisibility() {
     super._overrideVisibility();
     this.scene.traverse((object) => {

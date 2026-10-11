@@ -143,7 +143,32 @@ export function ModelProgress({ component }) {
   );
 }
 
-// Status text for a voice model (Kokoro or Whisper).
+// The downloaded weights keep their own license; the link sits next to Download. The desktop
+// app opens no browser windows, so there a click copies the address and shows it instead.
+export function LicenseLink({ component, onCopy }) {
+  const license = component?.license;
+  if (!license?.url) return null;
+  const family = String(component.model || 'Voice').replace(/\s+[\d.]+$/, '');
+  const text = `${family} voice model · license`;
+  return (
+    <a
+      className="license-link"
+      href={license.url}
+      target="_blank"
+      rel="noreferrer noopener"
+      title={`${license.name ? license.name + ' · ' : ''}${license.url}`}
+      onClick={(e) => {
+        if (!window.desktop || !onCopy) return;
+        e.preventDefault();
+        onCopy(license.url);
+      }}
+    >
+      {text}
+    </a>
+  );
+}
+
+// Status text for a voice model (Supertonic or Whisper).
 export function VoiceModelStatus({ component, missingText }) {
   if (!component) return <Status busy>Checking…</Status>;
   if (component.state === 'installing') return <ModelProgress component={component} />;

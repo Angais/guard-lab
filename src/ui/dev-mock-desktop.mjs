@@ -3,7 +3,10 @@
 //   &voice=ready | missing | error      (default: ready for mock=ready, otherwise missing)
 //   &mic=denied   &session=live | showcase   &setup=1 (show first-run setup again)
 //   &reset=1 (forget saved settings, setup and first-game hints)
+//   &prepare=2500 (slow Codex warm-up, to try Pause or New game while it runs)
+// window.__mockCodex records the Codex calls (prepared, sent, cancelled, reset) for checks.
 // main.jsx imports this only when import.meta.env.DEV is true, so builds never include it.
+import { VOICES as VOICE_CATALOG } from '../../shared/voice-catalog.mjs';
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const FIX_PROMPT =
@@ -12,7 +15,8 @@ const FIX_PROMPT =
 const MODELS = [
   {
     id: 'gpt-6-luna',
-    name: 'GPT-6 Luna',
+    // Codex's own display name for the default model.
+    name: 'GPT-6-Luna',
     efforts: ['low', 'medium', 'high'],
     defaultEffort: 'low',
     fast: true,
@@ -36,15 +40,7 @@ const MODELS = [
   },
 ];
 
-const VOICES = [
-  { id: 'kokoro:bm_george', name: 'George', accent: 'British', gender: 'male' },
-  { id: 'kokoro:bm_lewis', name: 'Lewis', accent: 'British', gender: 'male' },
-  { id: 'kokoro:bf_emma', name: 'Emma', accent: 'British', gender: 'female' },
-  { id: 'kokoro:am_michael', name: 'Michael', accent: 'American', gender: 'male' },
-  { id: 'kokoro:am_adam', name: 'Adam', accent: 'American', gender: 'male' },
-  { id: 'kokoro:af_heart', name: 'Heart', accent: 'American', gender: 'female' },
-  { id: 'kokoro:af_bella', name: 'Bella', accent: 'American', gender: 'female' },
-];
+const VOICES = VOICE_CATALOG.map((voice) => ({ ...voice }));
 
 const GUARD_LINES = [
   'I hear you. Please show a valid access pass, or tell me why you are here.',
@@ -163,10 +159,18 @@ export function installDevDesktop(search = location.search) {
     state,
     progress: state === 'ready' ? 1 : 0,
     bytes: 0,
-    totalBytes: kind === 'tts' ? 96e6 : 130e6,
-    sizeLabel: kind === 'tts' ? '96 MB' : '130 MB',
-    model: kind === 'tts' ? 'Kokoro 82M' : 'Whisper base.en',
+    totalBytes: kind === 'tts' ? 100.1e6 : 138.9e6,
+    sizeLabel: kind === 'tts' ? '100 MB' : '139 MB',
+    model: kind === 'tts' ? 'Supertonic 2' : 'Whisper base.en',
     message: state === 'error' ? 'Download interrupted. Check your connection.' : '',
+    ...(kind === 'tts'
+      ? {
+          license: {
+            name: 'OpenRAIL-M',
+            url: 'https://huggingface.co/Supertone/supertonic-2/blob/main/LICENSE',
+          },
+        }
+      : {}),
   });
   let voice = {
     tts: component('tts', voiceScenario),
@@ -201,6 +205,7 @@ export function installDevDesktop(search = location.search) {
   }
 
   const pendingDecisions = new Map();
+  const calls = (window.__mockCodex = { prepared: [], sent: [], cancelled: [], reset: [] });
   async function decideLater(id, data, actor, ms = 900) {
     const cancel = new Promise((_, reject) =>
       pendingDecisions.set(id, () => reject(new Error('Request cancelled.'))),
@@ -260,19 +265,27 @@ export function installDevDesktop(search = location.search) {
         await wait(250);
         return structuredClone(MODELS);
       },
-      prepare: async () => {
-        await wait(300);
+      prepare: async ({ sessionId } = {}) => {
+        await wait(Number(params.get('prepare')) || 300);
+        calls.prepared.push(sessionId);
         return { ok: true };
       },
       request: (data) => {
+        calls.sent.push(data.id);
         if (codex.state !== 'ready')
           return Promise.reject(
             new Error('Codex is not signed in. Sign in with ChatGPT in Settings.'),
           );
         return decideLater(data.id, data, data.actor, 800);
       },
-      cancel: async (id) => pendingDecisions.get(id)?.(),
-      reset: async () => true,
+      cancel: async (id) => {
+        calls.cancelled.push(id);
+        pendingDecisions.get(id)?.();
+      },
+      reset: async (sessionId) => {
+        calls.reset.push(sessionId);
+        return true;
+      },
     },
     voice: {
       status: async () => structuredClone(voice),

@@ -129,5 +129,10 @@ test('aimed attacks cannot consume ammo in darkness while room discharge remains
     assert.deepEqual(result.state.robot.ammo, state.robot.ammo);
     assert.deepEqual(result.state.human, state.human);
   }
-  assert.equal(applyTool(state, 'electrify_room').event.valid, true);
+  assert.equal(applyTool(state, 'electrify_room').event.valid, false, 'needs arming first');
+  const armed = applyHuman(
+    applyTool(state, 'ready_equipment', { tool: 'electrify_room' }).state,
+    'wait',
+  ).state;
+  assert.equal(applyTool(armed, 'electrify_room').event.valid, true);
 });

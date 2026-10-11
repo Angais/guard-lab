@@ -11,8 +11,8 @@ const require = createRequire(import.meta.url);
 const { registerVoice } = require('../electron/voice.cjs');
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
-// A "ready" Kokoro install without the real 92 MB weights: sparse files of the pinned sizes.
-async function fakeKokoro(dir) {
+// A "ready" Supertonic install without the real 100 MB weights: sparse files of the pinned sizes.
+async function fakeSupertonic(dir) {
   const spec = MODELS.tts,
     root = path.join(dir, 'models', ...spec.repo.split('/'));
   for (const entry of spec.files) {
@@ -28,6 +28,9 @@ async function fakeKokoro(dir) {
       kind: 'tts',
       repo: spec.repo,
       revision: spec.revision,
+      sources: [
+        ...new Set(spec.files.map((f) => `${f.repo || spec.repo}@${f.revision || spec.revision}`)),
+      ].sort(),
       dtype: spec.dtype,
     }),
   );
@@ -98,7 +101,7 @@ async function withService(run) {
   const dir = await temporaryDirectory('guard-voice-service-');
   let h;
   try {
-    await fakeKokoro(dir);
+    await fakeSupertonic(dir);
     h = harness(dir);
     await run(h, dir);
   } finally {
@@ -195,7 +198,7 @@ test('guard lines are cached on disk; the player character lines stay in memory'
     }
     assert.equal(files.length, 1, 'only the guard line is on disk');
     assert.ok(!files.includes('a'.repeat(64) + '.wav'));
-    await fs.access(path.join(cache, '.kokoro-cache-v1'));
+    await fs.access(path.join(cache, '.speech-cache-v2'));
     const again = await h.call('voice:synthesize', { text: 'I fix vents.', actor: 'human' });
     assert.ok(again.audio instanceof Uint8Array);
     assert.equal(h.jobs.length, 2, 'repeated human line came from memory');

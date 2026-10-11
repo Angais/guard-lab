@@ -12,20 +12,26 @@ One shared ruleset gives the guard its full range of responses, from waiting and
 
 ### Play
 
-[Download the latest release](https://github.com/flowers-ops/guard-lab/releases/latest), or clone `main` and run:
+[Download the latest release](https://github.com/flowers-ops/guard-lab/releases/latest):
+
+- **macOS** (Apple Silicon, macOS 13 or newer): unzip and move Guard Lab to Applications. It is not notarized, so the first open is blocked: go to **System Settings → Privacy & Security** and click **Open Anyway**.
+- **Windows** 10/11 x64: extract the `.zip` and open `Guard Lab.exe`. If SmartScreen appears, click **More info → Run anyway**. The single-file `-portable.exe` also works but unpacks itself on every start.
+- **Linux** x64: make the `.AppImage` executable (`chmod +x`) and run it.
+
+Or clone `main` (Node.js 22.12+; also for Intel Macs) and run:
 
 ```sh
 node scripts/setup.mjs
-npm start
+npm run play
 ```
 
 The first launch opens a short setup screen:
 
 - **Guard AI:** checks that Codex works. Signed out? Sign in with ChatGPT. Codex missing or broken? Copy the fix prompt and paste it into Codex or ChatGPT.
-- **Voices:** downloads Kokoro (about 96 MB) for natural voices.
-- **Voice input:** downloads Whisper (about 130 MB). Hold <kbd>Space</kbd> to talk to the guard.
+- **Voices:** downloads Kokoro (about 92 MB) for natural voices.
+- **Voice input:** downloads Whisper (about 139 MB). Hold <kbd>Space</kbd> to talk to the guard.
 
-Model, reasoning effort and fast mode live in **Settings → Guard**. The default is GPT-6 Luna, low effort, fast on. Node.js 22+ is required for source installs; existing installations don't update automatically.
+Model, reasoning effort and fast mode live in **Settings → Guard**. The default is GPT-6 Luna, low effort, fast on. Existing installations don't update automatically; see the [changelog](CHANGELOG.md) for what's new.
 
 ### Let your AI install it
 

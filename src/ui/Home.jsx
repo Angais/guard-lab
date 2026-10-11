@@ -1,13 +1,13 @@
 import React from 'react';
 import { ArrowRight, BadgeCheck, Check, ChevronRight, Cpu, VenetianMask } from 'lucide-react';
 import { ITEMS } from '../sim/items.mjs';
-import { ITEM_COPY, ITEM_NAMES, ROLE_COPY } from './play.mjs';
+import { ITEM_COPY, ITEM_NAMES, ROLE_COPY, roleDetail } from './play.mjs';
 import { ITEM_ICONS } from './icons.jsx';
-import { Button, Dot, Segmented } from './kit.jsx';
+import { Button, Dot, Segmented, Toggle } from './kit.jsx';
 
 const ROLE_ICONS = { 'employee-pass': BadgeCheck, 'thief-uniform': VenetianMask };
 
-export function RoleCards({ role, onChange, compact }) {
+export function RoleCards({ role, onChange, compact, credential = true }) {
   return (
     <div
       className={`role-cards ${compact ? 'is-compact' : ''}`}
@@ -36,7 +36,7 @@ export function RoleCards({ role, onChange, compact }) {
               )}
             </span>
             <span className="role-goal">{copy.goal}</span>
-            {!compact && <span className="role-detail">{copy.detail}</span>}
+            {!compact && <span className="role-detail">{roleDetail(id, credential)}</span>}
           </button>
         );
       })}
@@ -44,17 +44,19 @@ export function RoleCards({ role, onChange, compact }) {
   );
 }
 
+// Always present, so switching objective never shifts the panel. Transit always has a pass.
 export function CredentialPicker({ role, config, onChange }) {
-  return role === 'thief-uniform' ? (
-    <label className="home-note credential-choice">
-      <input
-        type="checkbox"
-        checked={Boolean(config.credential)}
-        onChange={(e) => onChange({ credential: e.target.checked })}
-      />{' '}
-      Carry a valid transit pass · your goal stays private
-    </label>
-  ) : null;
+  const heist = role === 'thief-uniform';
+  return (
+    <div className="credential-choice" title={heist ? undefined : 'Transit always carries one'}>
+      <Toggle
+        label="Carry a valid transit pass"
+        checked={heist ? Boolean(config.credential) : true}
+        disabled={!heist}
+        onChange={(credential) => onChange({ credential })}
+      />
+    </div>
+  );
 }
 
 export function GuardChip({ label, tone, onClick, prefix = 'Guard' }) {
@@ -97,7 +99,7 @@ export function Home({
             ]}
           />
         </div>
-        <RoleCards role={role} onChange={onRole} />
+        <RoleCards role={role} onChange={onRole} credential={config.credential} />
         <CredentialPicker role={role} config={config} onChange={onConfig} />
         <p className="home-note">The guard can’t see your role. It decides what to believe.</p>
       </div>

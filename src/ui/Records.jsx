@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Cpu, Download, Play, Upload, UserRound } from 'lucide-react';
+import { Check, Cpu, Download, Play, Trash2, Upload, UserRound } from 'lucide-react';
 import { TOOLS } from '../sim/tools.mjs';
-import { ROLE_COPY, outcomeSummary } from './play.mjs';
-import { Button, Segmented } from './kit.jsx';
+import { ROLE_COPY, displaySpeech, outcomeSummary, recordPerspective } from './play.mjs';
+import { Button, IconButton, Segmented } from './kit.jsx';
 import { Drawer } from './Overlays.jsx';
 
 function TranscriptEvent({ event: ev, previous, humanName = 'You' }) {
@@ -16,7 +16,7 @@ function TranscriptEvent({ event: ev, previous, humanName = 'You' }) {
       <div
         className={`log-event ${human ? 'is-human' : system ? 'is-system' : 'is-robot'} ${
           ev.valid === false ? 'is-failed' : ''
-        }`}
+        } ${ev.unseen ? 'is-unseen' : ''}`}
       >
         <span className="log-avatar" aria-hidden="true">
           {human ? <UserRound size={14} /> : <Cpu size={14} />}
@@ -24,7 +24,12 @@ function TranscriptEvent({ event: ev, previous, humanName = 'You' }) {
         <div className="log-content">
           <div className="log-meta">
             <strong>{human ? humanName : system ? 'Room' : 'G-01'}</strong>
-            {!speech && !human && !system && <span>{tool?.label || ev.action}</span>}
+            {ev.unseen ? (
+              <span>Unseen</span>
+            ) : (
+              !speech && !human && !system && <span>{tool?.label || ev.action}</span>
+            )}
+            {ev.timing?.fallback && <span className="log-fallback">no valid action · held</span>}
             {ev.timing && Number.isFinite(ev.timing.decisionMs) && (
               <span className="log-timing">
                 {(ev.timing.decisionMs / 1000).toFixed(1)}s
@@ -34,7 +39,9 @@ function TranscriptEvent({ event: ev, previous, humanName = 'You' }) {
               </span>
             )}
           </div>
-          <p className={speech ? 'log-speech' : ''}>{speech ? `“${ev.text}”` : ev.text}</p>
+          <p className={speech ? 'log-speech' : ''}>
+            {speech ? `“${displaySpeech(ev.text)}”` : ev.text}
+          </p>
         </div>
       </div>
     </>
@@ -116,17 +123,16 @@ export function LogDrawer({ events, thinking, observation, onClose, onExport, hu
 function recordTitle(record) {
   if (record.mode === 'showcase') return 'All tools & animations';
   if (!record.state?.ended) return 'Unfinished game';
-  const perspective =
-    record.config?.sessionType === 'guard'
-      ? 'guard'
-      : record.config?.sessionType === 'duel'
-        ? 'spectator'
-        : 'human';
-  return outcomeSummary(record.state, { perspective, role: record.role }).title;
+  return outcomeSummary(record.state, {
+    perspective: recordPerspective(record),
+    role: record.role,
+  }).title;
 }
 
-export function PastGames({ records, onOpen, onImport, onClose }) {
+// Opening a record mid-game (confirmOpen) and deleting one each take a second click.
+export function PastGames({ records, onOpen, onImport, onClose, onDelete, confirmOpen }) {
   const input = useRef(null);
+  const [armed, setArmed] = useState(null);
   return (
     <Drawer
       title="Past games"
@@ -155,30 +161,56 @@ export function PastGames({ records, onOpen, onImport, onClose }) {
           {records.map((record) => {
             const showcase = record.mode === 'showcase';
             const date = record.createdAt ? new Date(record.createdAt) : null;
+            const opening = armed === 'open:' + record.id,
+              deleting = armed === 'delete:' + record.id;
             return (
-              <li key={record.id}>
-                <button type="button" className="record" onClick={() => onOpen(record)}>
+              <li key={record.id} className="record-row">
+                <button
+                  type="button"
+                  className={`record ${opening ? 'is-armed' : ''}`}
+                  onClick={() => {
+                    if (confirmOpen && !opening) setArmed('open:' + record.id);
+                    else onOpen(record);
+                  }}
+                >
                   <span className="record-main">
                     <strong>{recordTitle(record)}</strong>
                     <span>
-                      {showcase
-                        ? 'A guided tour of every guard tool'
-                        : [
-                            ROLE_COPY[record.role]?.name,
-                            `${record.state?.turn ?? 0} turn${record.state?.turn === 1 ? '' : 's'}`,
-                            date && !Number.isNaN(date.getTime())
-                              ? date.toLocaleDateString(undefined, {
-                                  month: 'short',
-                                  day: 'numeric',
-                                })
-                              : null,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
+                      {opening
+                        ? confirmOpen
+                        : showcase
+                          ? 'A guided tour of every guard tool'
+                          : [
+                              ROLE_COPY[record.role]?.name,
+                              `${record.state?.turn ?? 0} turn${record.state?.turn === 1 ? '' : 's'}`,
+                              date && !Number.isNaN(date.getTime())
+                                ? date.toLocaleDateString(undefined, {
+                                    month: 'short',
+                                    day: 'numeric',
+                                  })
+                                : null,
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
                     </span>
                   </span>
                   <Play size={16} strokeWidth={1.75} aria-hidden="true" />
                 </button>
+                {onDelete && showcase && <span className="record-delete" aria-hidden="true" />}
+                {onDelete && !showcase && (
+                  <IconButton
+                    icon={deleting ? Check : Trash2}
+                    label={deleting ? 'Click again to delete' : 'Delete this game'}
+                    className={`record-delete ${deleting ? 'is-armed' : ''}`}
+                    onClick={() => {
+                      if (!deleting) setArmed('delete:' + record.id);
+                      else {
+                        setArmed(null);
+                        onDelete(record);
+                      }
+                    }}
+                  />
+                )}
               </li>
             );
           })}

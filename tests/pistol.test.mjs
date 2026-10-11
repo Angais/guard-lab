@@ -18,7 +18,7 @@ test('gunpoint is visible evidence, not damage or automatic surrender', () => {
   const lower = applyHuman(talk.state, 'lower_pistol');
   assert.equal(observe(lower.state).camera.humanVisibleWeapon, null);
 });
-test('recorded armor outcomes require two or three shots, never one, and consume finite rounds', () => {
+test('armor hits are fixed: exactly two shots destroy the guard and consume finite rounds', () => {
   const shotCounts = new Set();
   for (let seed = 1; seed < 100; seed++) {
     let s = pistol(seed),
@@ -31,7 +31,7 @@ test('recorded armor outcomes require two or three shots, never one, and consume
       s = shot.state;
       shots++;
       if (shots === 1) assert.equal(s.robot.alive, true);
-      assert.ok(shots <= 3);
+      assert.ok(shots <= 2);
     }
     shotCounts.add(shots);
     assert.equal(s.human.pistolRounds, 4 - shots);
@@ -52,7 +52,7 @@ test('recorded armor outcomes require two or three shots, never one, and consume
     s = applyHuman(s, 'leave').state;
     assert.equal(s.outcome, 'Item taken · guard objective failed');
   }
-  assert.deepEqual([...shotCounts].sort(), [2, 3]);
+  assert.deepEqual([...shotCounts], [2]);
 });
 test('gunshots are heard through a sack with self damage but no hidden position or ammunition', () => {
   const base = pistol();

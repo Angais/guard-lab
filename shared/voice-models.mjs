@@ -1,12 +1,13 @@
-// Local speech models: Kokoro-82M (text to speech) and Whisper base.en (speech to text).
+// Local speech models: Supertonic 2 (text to speech) and Whisper base.en (speech to text).
 // Used by the Electron voice worker and by `npm run voices:install`. Model files live in
 // dataDirectory()/models; nothing is fetched outside installModel().
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import runtime from './runtime.cjs';
-import { kokoroStyle, resolveVoice } from './voice-catalog.mjs';
+import { voiceStyle, resolveVoice, DEFAULT_VOICES } from './voice-catalog.mjs';
 import {
   STT_SAMPLE_RATE,
   encodeWav,
@@ -14,6 +15,7 @@ import {
   isSilent,
   cleanTranscript,
   speakableText,
+  spellNumbers,
   sentenceChunks,
   joinAudio,
   sizeLabel,
@@ -23,32 +25,77 @@ export * from './voice-audio.mjs';
 export const MARKER_VERSION = 1;
 export const KINDS = Object.freeze(['tts', 'stt']);
 
-const file = (name, size, sha256) => Object.freeze({ path: name, size, sha256 });
+// `from` names the file's upstream location when it differs from the component's repo/path.
+const file = (name, size, sha256, from) =>
+  Object.freeze({ path: name, size, sha256, ...(from ? from : {}) });
+// Supertonic 2's int8 ONNX conversion by k2-fsa/sherpa-onnx (same OpenRAIL-M weights).
+const INT8 = Object.freeze({
+  repo: 'csukuangfj2/sherpa-onnx-supertonic-tts-int8-2026-03-06',
+  revision: '5dec5897b86e2b293790eedb5e1f561a3295651f',
+});
+const int8 = (name, size, sha256) => file('int8/' + name, size, sha256, { ...INT8, remote: name });
+const style = (name, size, sha256) => file(`voice_styles/${name}.json`, size, sha256);
+
 // Revisions are pinned to upstream commits; sizes and SHA-256 digests verify every byte.
 export const MODELS = Object.freeze({
   tts: Object.freeze({
     kind: 'tts',
-    label: 'Kokoro-82M',
-    title: 'Kokoro voices',
-    repo: 'onnx-community/Kokoro-82M-v1.0-ONNX',
-    revision: '1939ad2a8e416c0acfeecc08a694d14ef25f2231',
-    dtype: 'q8',
+    label: 'Supertonic 2',
+    title: 'Supertonic voices',
+    repo: 'Supertone/supertonic-2',
+    revision: '75e6727618a02f323c720cba9478152d4bc16ca4',
+    dtype: 'int8',
+    // The weights are never bundled: the player downloads them and their license applies.
+    license: Object.freeze({
+      name: 'OpenRAIL-M',
+      url: 'https://huggingface.co/Supertone/supertonic-2/blob/main/LICENSE',
+    }),
+    // Earlier releases' Kokoro model: reported in status, deleted once Supertonic is installed.
+    legacy: Object.freeze([
+      Object.freeze({ model: 'Kokoro-82M', path: 'onnx-community/Kokoro-82M-v1.0-ONNX' }),
+    ]),
     files: Object.freeze([
-      file('config.json', 44, 'df34b4f930b23447cd4dc410fabfb42eb3f24e803e6c3f97d618fb359380a36f'),
+      file('LICENSE', 15007, '0d944a9110fed9a9602d60e0423a272903e7bd21ab060490774efc77c2275e9f'),
       file(
-        'tokenizer.json',
-        3497,
-        '77a02c8e164413299b4b4c403b14f8e0e1c1b727db4d46a09d6327b861060a34',
+        'onnx/tts.json',
+        8699,
+        'ee531d9af9b80438a2ed703e22155ee6c83b12595ab22fd3bb6de94c7502fe96',
       ),
       file(
-        'tokenizer_config.json',
-        113,
-        'be1cb066d6ef6b074b3f15e6a6dd21ac88ff3cdaedf325f0aaed686c70f75d20',
+        'onnx/unicode_indexer.json',
+        262196,
+        'b7662a73a0703f43b97c0f2e089f8e8325e26f5d841aca393b5a54c509c92df1',
       ),
-      file(
-        'onnx/model_quantized.onnx',
-        92361116,
-        'fbae9257e1e05ffc727e951ef9b9c98418e6d79f1c9b6b13bd59f5c9028a1478',
+      style('M1', 420510, 'a04c823cbda6dd1c7de131ec68fea83bbb70d7f29d61623304eb871e3b83b5a1'),
+      style('M2', 420285, '7ddd07bf873a3fd67d09ef4e8293b486beb658158b47e371166198e4c6926072'),
+      style('M3', 420005, 'e8e77a56459e4dc8cdfeb88e6f778dc9a0adf22e1184414f4b0e82a5d1edbe72'),
+      style('M4', 419957, '95322725e4d25d9ed4e7dcccbf0f3726b0e9a2471d876b7942373218dbd30174'),
+      style('M5', 419619, 'be52f82327da63ff18481ce2dd8060c7df432e0168d748745ef3e21b92d706a5'),
+      style('F1', 420050, '6106950ebeb8a5da29ea22075f605db659cd07dbc288a68292543d9129aa250f'),
+      style('F2', 420293, '8b97feb16d79ac0447136796708feac5f83dbabe92a5be1168212653c38729ae'),
+      style('F3', 419887, '7eda5bccb4e6eb7f228fa182462d5fcf982d77628234603599027f0734d70c29'),
+      style('F4', 419642, 'e056fc2bee393edc8bff761eb28f33fb461e8dad828c3b05348a010ac1b7bb79'),
+      style('F5', 419709, 'ce7645ad7e3c13cca04e0d62bf890ef9ac401988005ba8f5e9c9b59257bc6931'),
+      int8('LICENSE', 1070, '0dfe0d0ba84416fe3879d9a34f4909d8d0137c78d1e95834177b0414ac096fa2'),
+      int8(
+        'duration_predictor.int8.onnx',
+        1521526,
+        '6d556b3691165c364be91dc0bd894656b5949f5acd2750d8ec2f954010845011',
+      ),
+      int8(
+        'text_encoder.int8.onnx',
+        27431318,
+        'dd5f535ed629f7df86071043e15f541ce1b2ab7f1bdbce4c7892b307bca79fa3',
+      ),
+      int8(
+        'vector_estimator.int8.onnx',
+        40686657,
+        '9cce89801068dc998719fbc91777f99f3f4d16ee36592281f8703f32e305daa2',
+      ),
+      int8(
+        'vocoder.int8.onnx',
+        25977132,
+        'db99c36fb871fbfb128b903662995f2e22213e875f2434f319f8d10ee0f10e90',
       ),
     ]),
   }),
@@ -105,9 +152,58 @@ const specFor = (kind, spec) => {
   return MODELS[kind];
 };
 const sameDtype = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Where a file comes from upstream: its own repo/revision/path, or the component's.
+const upstream = (spec, entry) => ({
+  repo: entry.repo || spec.repo,
+  revision: entry.revision || spec.revision,
+  remote: entry.remote || entry.path,
+});
+// Every upstream commit a component is built from (markers written before this field existed
+// name only their own repo and revision).
+const sourcesOf = (spec) =>
+  [
+    ...new Set(
+      spec.files.map((entry) => upstream(spec, entry)).map((u) => u.repo + '@' + u.revision),
+    ),
+  ].sort();
 
-function component(spec, state, message, extra = {}) {
+async function folderBytes(root) {
+  let bytes = 0;
+  for (const name of await fs.readdir(root, { recursive: true }).catch(() => [])) {
+    const stat = await fs.stat(path.join(root, name)).catch(() => null);
+    if (stat?.isFile()) bytes += stat.size;
+  }
+  return bytes;
+}
+
+/** Disk use of an earlier release's model for this component (null when none is left). */
+async function legacyStatus(dir, spec) {
+  let bytes = 0;
+  const models = [];
+  for (const old of spec.legacy || []) {
+    const size = await folderBytes(path.join(dir, ...old.path.split('/')));
+    if (size) {
+      bytes += size;
+      models.push(old.model);
+    }
+  }
+  return bytes ? { model: models.join(', '), bytes, sizeLabel: sizeLabel(bytes) } : null;
+}
+
+/** Delete an earlier release's model for this component. Never touches other components. */
+async function removeLegacy(dir, spec) {
+  for (const old of spec.legacy || []) {
+    const root = path.join(dir, ...old.path.split('/'));
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
+    // The organisation folder is shared (Whisper is onnx-community/whisper-base.en): only an
+    // empty one is removed.
+    await fs.rmdir(path.dirname(root)).catch(() => {});
+  }
+}
+
+async function component(spec, state, message, { dir } = {}) {
   const total = totalBytes(spec);
+  const legacy = dir && spec.legacy ? await legacyStatus(dir, spec) : null;
   return {
     state,
     progress: state === 'ready' ? 1 : 0,
@@ -116,7 +212,8 @@ function component(spec, state, message, extra = {}) {
     sizeLabel: sizeLabel(total),
     model: spec.label,
     message,
-    ...extra,
+    ...(spec.license ? { license: { ...spec.license } } : {}),
+    ...(legacy ? { legacy } : {}),
   };
 }
 
@@ -127,20 +224,22 @@ export async function readStatus(kind, { dir = modelsDirectory(), spec } = {}) {
     .readFile(markerPath(dir, spec), 'utf8')
     .then(JSON.parse)
     .catch(() => null);
-  if (!marker) return component(spec, 'missing', 'Not installed');
+  const status = (state, message) => component(spec, state, message, { dir });
+  if (!marker) return status('missing', 'Not installed');
   if (
     marker.version !== MARKER_VERSION ||
     marker.repo !== spec.repo ||
     marker.revision !== spec.revision ||
-    !sameDtype(marker.dtype, spec.dtype)
+    !sameDtype(marker.dtype, spec.dtype) ||
+    !sameDtype(marker.sources || [marker.repo + '@' + marker.revision], sourcesOf(spec))
   )
-    return component(spec, 'missing', 'A newer model is available. Install to update.');
+    return status('missing', 'A newer model is available. Install to update.');
   for (const entry of spec.files) {
     const stat = await fs.stat(path.join(modelRoot(dir, spec), entry.path)).catch(() => null);
     if (!stat?.isFile() || stat.size !== entry.size)
-      return component(spec, 'error', 'Model files are damaged. Install again to repair.');
+      return status('error', 'Model files are damaged. Install again to repair.');
   }
-  return component(spec, 'ready', 'Ready');
+  return status('ready', 'Ready');
 }
 
 async function sha256File(file) {
@@ -154,6 +253,26 @@ async function intact(file, entry) {
   return Boolean(
     stat?.isFile() && stat.size === entry.size && (await sha256File(file)) === entry.sha256,
   );
+}
+
+/**
+ * The copy of `entry` inside a local `source` folder. Accepted layouts: a models directory
+ * (<source>/<org>/<repo>/<path>), a mirror of upstream repos (<source>/<org>/<repo>/<file>), one
+ * downloaded repo (<source>/<file>), or folders of downloaded repos with any names
+ * (<source>/<folder>/<file>). Only a file with the expected size and digest is used.
+ */
+async function sourceFile(source, spec, entry) {
+  const root = path.resolve(source),
+    { repo, remote } = upstream(spec, entry);
+  const candidates = [
+    path.join(root, ...spec.repo.split('/'), entry.path),
+    path.join(root, ...repo.split('/'), remote),
+    path.join(root, remote),
+  ];
+  for (const folder of await fs.readdir(root, { withFileTypes: true }).catch(() => []))
+    if (folder.isDirectory()) candidates.push(path.join(root, folder.name, remote));
+  for (const candidate of new Set(candidates)) if (await intact(candidate, entry)) return candidate;
+  throw new Error(`${repo}/${remote} (${sizeLabel(entry.size)}) was not found in ${root}.`);
 }
 
 async function acquireLock(lock, onWait) {
@@ -203,17 +322,24 @@ async function releaseLock(lock, token) {
   if (owner?.token === token) await fs.rm(lock, { force: true });
 }
 
-function friendly(error, name) {
+// Chromium errors for a connection that dropped after the download had started.
+const INTERRUPTED =
+  /^net::ERR_(?:CONTENT_LENGTH_MISMATCH|INCOMPLETE_CHUNKED_ENCODING|CONNECTION_(?:RESET|CLOSED|ABORTED)|NETWORK_(?:CHANGED|IO_SUSPENDED)|HTTP2_PROTOCOL_ERROR|SOCKET_NOT_CONNECTED)$/;
+
+function friendly(error, name, received = 0) {
   if (error?.name === 'AbortError' || error?.name === 'TimeoutError')
     return new Error(`Download of ${name} stalled. Check your connection and retry.`);
-  if (error instanceof TypeError && /fetch/i.test(error.message))
-    return new Error('Could not reach huggingface.co. Check your connection and retry.');
   // Electron's net.fetch (used by the app so system proxies and certificates apply).
-  const network = /\bnet::ERR_[A-Z_]+/.exec(error?.message || '');
+  const network = /\bnet::ERR_[A-Z_]+/.exec(error?.message || '')?.[0];
+  const fetchFailed = error instanceof TypeError && /fetch|terminated/i.test(error.message);
+  if ((network || fetchFailed) && (received > 0 || INTERRUPTED.test(network || '')))
+    return new Error(`Download interrupted${network ? ` (${network})` : ''}. Retry to continue.`);
   if (network)
     return new Error(
-      `Could not reach huggingface.co (${network[0]}). Check your connection and retry.`,
+      `Could not reach huggingface.co (${network}). Check your connection and retry.`,
     );
+  if (fetchFailed)
+    return new Error('Could not reach huggingface.co. Check your connection and retry.');
   return error;
 }
 
@@ -271,7 +397,7 @@ async function fetchFile(target, entry, { url, source, fetchImpl, signal, idleMs
   } catch (error) {
     await handle.close().catch(() => {});
     await fs.rm(part, { force: true });
-    throw friendly(error, name);
+    throw friendly(error, name, received);
   }
 }
 
@@ -367,9 +493,10 @@ async function install(
   report('downloading', done, todo.length ? 'Downloading ' + spec.label : 'Files verified');
   for (const entry of todo) {
     let last = 0;
+    const { repo, revision, remote } = upstream(spec, entry);
     await fetchFile(path.join(root, entry.path), entry, {
-      url: `${endpoint.replace(/\/$/, '')}/${spec.repo}/resolve/${spec.revision}/${entry.path}`,
-      source: source && path.join(path.resolve(source), ...spec.repo.split('/'), entry.path),
+      url: `${endpoint.replace(/\/$/, '')}/${repo}/resolve/${revision}/${remote}`,
+      source: source && (await sourceFile(source, spec, entry)),
       fetchImpl,
       signal,
       idleMs,
@@ -399,6 +526,7 @@ async function install(
     kind: spec.kind,
     repo: spec.repo,
     revision: spec.revision,
+    sources: sourcesOf(spec),
     dtype: spec.dtype,
     files: Object.fromEntries(spec.files.map((entry) => [entry.path, entry.size])),
     installedAt: new Date().toISOString(),
@@ -406,6 +534,7 @@ async function install(
   const temporary = markerPath(dir, spec) + '.' + randomUUID() + '.tmp';
   await fs.writeFile(temporary, JSON.stringify(marker, null, 2));
   await fs.rename(temporary, markerPath(dir, spec));
+  await removeLegacy(dir, spec);
   report('ready', total, 'Ready');
   return { status: await readStatus(spec.kind, { dir, spec }), model };
 }
@@ -416,6 +545,7 @@ export async function removeModel(kind, { dir = modelsDirectory(), spec } = {}) 
   await fs.rm(markerPath(dir, spec), { force: true });
   await fs.rm(modelRoot(dir, spec), { recursive: true, force: true, maxRetries: 4 });
   await fs.rmdir(path.dirname(modelRoot(dir, spec))).catch(() => {});
+  await removeLegacy(dir, spec);
   return readStatus(kind, { dir, spec });
 }
 
@@ -461,13 +591,173 @@ async function transformers(dir) {
   return library;
 }
 
+let ortModule;
+function onnxRuntime() {
+  ortModule ||= import('onnxruntime-node')
+    .then((module) => (module.InferenceSession ? module : module.default))
+    .catch((error) => {
+      ortModule = null;
+      throw runtimeFailure(error);
+    });
+  return ortModule;
+}
+
+const cancelled = () => Object.assign(new Error('Speech cancelled.'), { code: 'CANCELLED' });
+
+// Deterministic noise for the flow-matching sampler: one seed per (voice, text), so a line
+// always sounds the same and cached audio matches a fresh synthesis.
+function seedOf(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return hash >>> 0;
+}
+function gaussian(length, seed) {
+  let state = seed | 0;
+  const random = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i++)
+    out[i] = Math.sqrt(-2 * Math.log(Math.max(1e-10, random()))) * Math.cos(2 * Math.PI * random());
+  return out;
+}
+
+const SUPERTONIC_REPLACE = [
+  [/[–‑—]/g, '-'],
+  [/_/g, ' '],
+  [/[“”]/g, '"'],
+  [/[‘’´`]/g, "'"],
+  [/[[\]|/#→←]/g, ' '],
+  [/[♥☆♡©\\]/g, ''],
+  [/@/g, ' at '],
+];
+
+/** Supertonic's character input: NFKD text in a language tag, ending with punctuation. */
+export function supertonicText(text, lang = 'en') {
+  let clean = String(text ?? '').normalize('NFKD');
+  for (const [pattern, value] of SUPERTONIC_REPLACE) clean = clean.replace(pattern, value);
+  clean = clean
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/ ([,.!?;:'])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!/[.!?;:,'")\]}…]$/.test(clean)) clean += '.';
+  return `<${lang}>${clean}</${lang}>`;
+}
+
+// Flow-matching steps per pass: 5 is the upstream default (2 sounds rough, 8 adds little).
+export const SUPERTONIC_STEPS = 5;
+// Upstream's default speaking rate; the game's speed setting multiplies it.
+export const SUPERTONIC_SPEED = 1.05;
+
+/** Supertonic 2 on onnxruntime-node: four ONNX sessions and the voice style vectors. */
+class Supertonic {
+  static async load(root) {
+    const ort = await onnxRuntime();
+    const read = async (name) => JSON.parse(await fs.readFile(path.join(root, name), 'utf8'));
+    const [config, indexer] = await Promise.all([
+      read('onnx/tts.json'),
+      read('onnx/unicode_indexer.json'),
+    ]);
+    const options = {
+      intraOpNumThreads: Math.max(1, Math.min(4, os.availableParallelism?.() || 4)),
+      interOpNumThreads: 1,
+      graphOptimizationLevel: 'all',
+    };
+    const names = ['duration_predictor', 'text_encoder', 'vector_estimator', 'vocoder'];
+    const sessions = await Promise.allSettled(
+      names.map((name) =>
+        ort.InferenceSession.create(path.join(root, 'int8', name + '.int8.onnx'), options),
+      ),
+    );
+    const failed = sessions.find((result) => result.status === 'rejected');
+    if (failed) {
+      for (const result of sessions)
+        if (result.status === 'fulfilled') await result.value.release?.().catch(() => {});
+      throw failed.reason;
+    }
+    return new Supertonic(
+      ort,
+      root,
+      config,
+      indexer,
+      sessions.map((result) => result.value),
+    );
+  }
+
+  constructor(ort, root, config, indexer, [duration, encoder, estimator, vocoder]) {
+    Object.assign(this, { ort, root, indexer, duration, encoder, estimator, vocoder });
+    this.sampleRate = config.ae.sample_rate;
+    this.chunk = config.ae.base_chunk_size * config.ttl.chunk_compress_factor;
+    this.latentDim = config.ttl.latent_dim * config.ttl.chunk_compress_factor;
+    this.styles = new Map();
+  }
+
+  async style(name) {
+    if (!/^[MF][1-5]$/.test(name)) throw new Error('Unknown voice style.');
+    if (!this.styles.has(name)) {
+      const json = JSON.parse(
+        await fs.readFile(path.join(this.root, 'voice_styles', name + '.json'), 'utf8'),
+      );
+      const tensor = (s) =>
+        new this.ort.Tensor('float32', Float32Array.from(s.data.flat(Infinity)), s.dims);
+      this.styles.set(name, { ttl: tensor(json.style_ttl), dp: tensor(json.style_dp) });
+    }
+    return this.styles.get(name);
+  }
+
+  /** One pass: text (a sentence or a few) → mono float samples at this.sampleRate. */
+  async generate(text, { voice = 'M1', speed = 1, steps = SUPERTONIC_STEPS, seed, signal } = {}) {
+    const { ort } = this,
+      styles = await this.style(voice),
+      input = supertonicText(text);
+    const ids = Array.from(input, (c) => Math.max(0, this.indexer[c.charCodeAt(0)] ?? 0));
+    const length = ids.length,
+      textIds = new ort.Tensor('int64', BigInt64Array.from(ids, BigInt), [1, length]),
+      textMask = new ort.Tensor('float32', new Float32Array(length).fill(1), [1, 1, length]);
+    const [{ duration }, { text_emb: textEmb }] = await Promise.all([
+      this.duration.run({ text_ids: textIds, style_dp: styles.dp, text_mask: textMask }),
+      this.encoder.run({ text_ids: textIds, style_ttl: styles.ttl, text_mask: textMask }),
+    ]);
+    const samples = Math.max(1, Math.floor((duration.data[0] / speed) * this.sampleRate)),
+      frames = Math.ceil(samples / this.chunk);
+    let latent = gaussian(this.latentDim * frames, seed ?? seedOf(voice + '|' + input));
+    const latentMask = new ort.Tensor('float32', new Float32Array(frames).fill(1), [1, 1, frames]),
+      total = new ort.Tensor('float32', Float32Array.of(steps), [1]);
+    for (let step = 0; step < steps; step++) {
+      if (signal?.aborted) throw cancelled();
+      const result = await this.estimator.run({
+        noisy_latent: new ort.Tensor('float32', latent, [1, this.latentDim, frames]),
+        text_emb: textEmb,
+        style_ttl: styles.ttl,
+        text_mask: textMask,
+        latent_mask: latentMask,
+        total_step: total,
+        current_step: new ort.Tensor('float32', Float32Array.of(step), [1]),
+      });
+      latent = result.denoised_latent.data;
+    }
+    const { wav_tts: wav } = await this.vocoder.run({
+      latent: new ort.Tensor('float32', latent, [1, this.latentDim, frames]),
+    });
+    return wav.data.slice(0, samples);
+  }
+
+  async release() {
+    const sessions = [this.duration, this.encoder, this.estimator, this.vocoder];
+    this.duration = this.encoder = this.estimator = this.vocoder = null;
+    // Released explicitly: onnxruntime can abort at process exit with sessions still open.
+    for (const session of sessions) await session?.release?.().catch(() => {});
+  }
+}
+
 export async function loadModel(kind, { dir = modelsDirectory() } = {}) {
   const spec = specFor(kind);
+  if (kind === 'tts') return Supertonic.load(modelRoot(dir, spec));
   const library = await transformers(dir);
-  if (kind === 'tts') {
-    const { KokoroTTS } = await import('kokoro-js');
-    return KokoroTTS.from_pretrained(spec.repo, { dtype: spec.dtype, device: 'cpu' });
-  }
   return library.pipeline('automatic-speech-recognition', spec.repo, {
     dtype: { ...spec.dtype },
     device: 'cpu',
@@ -476,7 +766,8 @@ export async function loadModel(kind, { dir = modelsDirectory() } = {}) {
 
 export async function unloadModel(model) {
   try {
-    await (model?.model?.dispose?.() ?? model?.dispose?.());
+    if (model instanceof Supertonic) await model.release();
+    else await (model?.model?.dispose?.() ?? model?.dispose?.());
   } catch {}
 }
 
@@ -491,8 +782,8 @@ export async function defaultCheck(spec, { dir }) {
   }
   try {
     if (spec.kind === 'tts') {
-      const audio = await model.generate('Ready.', { voice: 'bm_george' });
-      if (!audio?.audio?.length) throw new Error('Kokoro produced no audio.');
+      const audio = await model.generate('Ready.', { voice: voiceStyle(DEFAULT_VOICES.robot) });
+      if (!audio?.length) throw new Error('Supertonic produced no audio.');
     } else await model(new Float32Array(STT_SAMPLE_RATE));
     return model;
   } catch (error) {
@@ -501,14 +792,19 @@ export async function defaultCheck(spec, { dir }) {
   }
 }
 
-const cancelled = () => Object.assign(new Error('Speech cancelled.'), { code: 'CANCELLED' });
-// Kokoro pass size: sentences merged up to this length. Shorter passes let a cancelled line
-// stop sooner (the signal is checked between passes); the limit of one pass is ~500 phonemes.
-export const KOKORO_CHUNK = 100;
+// Pass size: sentences merged up to TTS_CHUNK characters. A longer sentence is split at clauses,
+// and at words only above TTS_HARD_LIMIT: each pass ends with falling intonation, so a cut
+// mid-phrase sounds like a full stop. A cancelled line stops before its next flow step.
+export const TTS_CHUNK = 230;
+export const TTS_HARD_LIMIT = 300;
+
+/** Text prepared for Supertonic: speakable, numbers spelled out, split into passes. */
+export const speechPasses = (text) =>
+  sentenceChunks(spellNumbers(speakableText(text)), TTS_CHUNK, TTS_HARD_LIMIT);
 
 /**
- * Kokoro text → { wav: Uint8Array, sampleRate, durationMs, voice }. An aborted `signal` stops
- * the job before the next pass.
+ * Supertonic text → { wav: Uint8Array, sampleRate, durationMs, voice }. An aborted `signal`
+ * stops the job before its next flow-matching step.
  */
 export async function synthesizeSpeech(
   tts,
@@ -516,19 +812,16 @@ export async function synthesizeSpeech(
   { signal } = {},
 ) {
   const id = resolveVoice(voice, actor),
-    style = kokoroStyle(id),
     rate = Math.min(1.6, Math.max(0.6, Number(speed) || 1));
-  const chunks = sentenceChunks(speakableText(text), KOKORO_CHUNK);
+  const chunks = speechPasses(text);
   if (!chunks.length) throw new Error('Nothing to say.');
-  let sampleRate = 24000;
+  const sampleRate = tts.sampleRate;
   const parts = [];
-  for (const [index, chunk] of chunks.entries()) {
-    // Let a pending abort message arrive: an inference pass blocks the worker's event loop.
-    if (signal && index) await new Promise((resolve) => setTimeout(resolve, 0));
+  for (const chunk of chunks) {
     if (signal?.aborted) throw cancelled();
-    const result = await tts.generate(chunk, { voice: style, speed: rate });
-    sampleRate = result.sampling_rate || sampleRate;
-    parts.push(result.audio);
+    parts.push(
+      await tts.generate(chunk, { voice: voiceStyle(id), speed: SUPERTONIC_SPEED * rate, signal }),
+    );
   }
   const samples = joinAudio(parts, sampleRate);
   return {
@@ -586,7 +879,9 @@ export class VoiceEngine {
         if (status.state !== 'ready')
           throw Object.assign(
             new Error(
-              kind === 'tts' ? 'Kokoro is not installed.' : 'Speech-to-text is not installed.',
+              kind === 'tts'
+                ? 'Supertonic voices are not installed.'
+                : 'Speech-to-text is not installed.',
             ),
             { code: 'NOT_INSTALLED' },
           );

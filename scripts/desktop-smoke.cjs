@@ -1,8 +1,10 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, Menu } = require('electron');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const http = require('node:http');
-app.disableHardwareAcceleration();
+// Use the GPU when there is one; CI machines without a GPU fall back to WebGL on the CPU
+// (SwiftShader), so the 3D room is exercised everywhere.
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
 require('../electron/main.cjs');
 
 app.whenReady().then(async () => {
@@ -19,6 +21,36 @@ app.whenReady().then(async () => {
       ),
       true,
     );
+    assert.equal(
+      await window.webContents.executeJavaScript('window.desktop.version'),
+      require('../package.json').version,
+    );
+    // The room mounts behind the setup screen; a WebGL2 canvas means the renderer started.
+    assert.equal(
+      await window.webContents.executeJavaScript(`new Promise((resolve) => {
+        const started = Date.now();
+        const poll = () => {
+          const canvas = document.querySelector('canvas');
+          if (canvas || Date.now() - started > 10000) resolve(Boolean(canvas?.getContext('webgl2')));
+          else setTimeout(poll, 100);
+        };
+        poll();
+      })`),
+      true,
+      'WebGL2 room renderer',
+    );
+    // The built app has no Reload or Developer Tools: a reload would silently end a game.
+    const roles = [];
+    const walk = (menu) =>
+      menu?.items.forEach((item) => {
+        roles.push(String(item.role || '').toLowerCase());
+        walk(item.submenu);
+      });
+    walk(Menu.getApplicationMenu());
+    assert.ok(roles.includes('paste') && roles.includes('togglefullscreen'));
+    for (const role of ['reload', 'forcereload', 'toggledevtools'])
+      assert.ok(!roles.includes(role));
+    console.log('OK: app version, WebGL2 room renderer, game menu without reload or DevTools');
     const voice = await run('voice.status');
     assert.equal(voice.tts.state, 'missing');
     assert.equal(voice.stt.state, 'missing');

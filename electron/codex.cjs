@@ -29,7 +29,10 @@ const SUBMITTED = 'Submitted. The outcome arrives with your next observation.';
 const WARMUP_TEXT =
   'Guard Lab: the encounter is about to start. Do nothing yet; your first observation follows.';
 const INTERFACE_NOTE =
-  '\n\nInterface: each user message is your newest observation from the game. Respond by calling exactly one of the currently available game tools. Plain text without a tool call is spoken aloud as your action.';
+  '\n\nInterface: each user message is your newest observation from the game. Respond by calling exactly one of the currently available game tools. Plain text without a tool call is spoken aloud as your action.' +
+  ' Guard Lab ends each turn itself once it has your action (and ends the start-up turn before you reply), so Codex marks those turns as interrupted. That notice is part of the interface, not a game event: an action you called was received, and its outcome arrives with your next observation.';
+// An id cancelled before its request arrived (the renderer may still send it) is refused.
+const CANCEL_MEMORY_MS = 60000;
 
 // Noisy streaming notifications Guard Lab never reads.
 const OPT_OUT_NOTIFICATIONS = [
@@ -150,6 +153,7 @@ const clip = (text, limit = 400) => {
   const value = String(text || '').trim();
   return value.length > limit ? value.slice(0, limit - 1) + '…' : value;
 };
+const cancelledError = () => new CodexError('Codex request cancelled.', { code: 'cancelled' });
 const shortVersion = (version) => String(version || '').match(/\d+\.\d+/)?.[0] || version || '';
 const isPlainObject = (value) =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -304,6 +308,36 @@ function describeEntry(message) {
   return contentText(message);
 }
 /**
+ * A Codex thread keeps every observation it is sent, so a turn leaves out exact repeats: the
+ * physical rules when the system prompt already states them verbatim, and the observation's
+ * tool list when the turn's closing line names the same tools. Everything else is unchanged.
+ */
+function withoutRepeats(text, { system, toolNames }) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (!isPlainObject(parsed)) return text;
+  const observation = isPlainObject(parsed.observation) ? parsed.observation : parsed;
+  let changed = false;
+  if (isPlainObject(observation.rules) && system.includes(JSON.stringify(observation.rules))) {
+    delete observation.rules;
+    changed = true;
+  }
+  const listed = observation.self?.availableTools;
+  if (
+    Array.isArray(listed) &&
+    listed.length === toolNames.length &&
+    [...listed].sort().join() === [...toolNames].sort().join()
+  ) {
+    delete observation.self.availableTools;
+    changed = true;
+  }
+  return changed ? JSON.stringify(parsed) : text;
+}
+/**
  * Builds the text for one Codex turn from OpenAI-chat-shaped `messages` (messages[0] is the
  * system prompt). Only messages the thread has not seen yet are sent: those after the last
  * assistant message, skipping anything up to `lastSent`. `recap` replays earlier context into a
@@ -332,7 +366,9 @@ function formatTurnInput(messages, { toolNames = [], recap = false, lastSent = n
   for (const message of fresh.filter((m) => m?.role === 'tool'))
     parts.push(`Result of your previous action: ${contentText(message)}`);
   const observations = fresh.filter((m) => m?.role !== 'tool' && m?.role !== 'system');
-  for (const message of observations) parts.push(describeEntry(message));
+  const system = contentText(messages?.[0]);
+  for (const message of observations)
+    parts.push(withoutRepeats(contentText(message), { system, toolNames }));
   parts.push(
     toolNames.length
       ? `Available tools now: ${toolNames.join(', ')}. Call exactly one.`
@@ -963,7 +999,10 @@ function createCodexService({
   const listeners = new Set();
   const threads = new Map();
   const locks = new Map();
+  // Requests by id (for cancel), and every unfinished request or prepare (for reset).
   const active = new Map();
+  const inflight = new Set();
+  const cancelledIds = new Map();
   let connection = null;
   let starting = null;
   let binary = null;
@@ -1050,6 +1089,14 @@ function createCodexService({
       current && (!params.turnId || !current.id || params.turnId === current.id) ? current : null;
     if (method === 'thread/tokenUsage/updated' && turn) {
       turn.usage = params.tokenUsage?.last || null;
+      // Codex reports a tool call's usage just after the decision has been returned, so it is
+      // attached to this actor's next decision instead.
+      if (turn.accepted && !turn.usageNoted && isPlainObject(turn.usage)) {
+        turn.usageNoted = true;
+        thread.previousUsage = Object.fromEntries(
+          Object.entries(turn.usage).filter(([, value]) => Number.isFinite(value)),
+        );
+      }
       turn.onEvent?.('usage');
     } else if (method === 'thread/settings/updated' && thread)
       thread.reportedTier = params.threadSettings?.serviceTier ?? thread.reportedTier;
@@ -1669,7 +1716,7 @@ function createCodexService({
     tail.then(() => locks.get(key) === tail && locks.delete(key));
     return run;
   }
-  async function ensureThread({ key, system, allTools, tools, chosen, sessionId, actor }) {
+  async function ensureThread({ key, system, allTools, tools, chosen, sessionId, actor, record }) {
     const conn = await ensureConnection({ codexPath: chosen.codexPath });
     const existing = threads.get(key);
     // The thread is tied to the system prompt and the declared tool set (allTools).
@@ -1692,6 +1739,11 @@ function createCodexService({
       Object.assign(chosen, chooseSettings(chosen.requested));
     }
     const started = await startThread(conn, { system, dynamicTools, chosen });
+    // The encounter was reset while its thread was starting: nothing will reset it again.
+    if (record?.reset) {
+      conn.request('thread/unsubscribe', { threadId: started.threadId }, 5000).catch(() => {});
+      throw cancelledError();
+    }
     const thread = {
       key,
       sessionId,
@@ -1757,7 +1809,8 @@ function createCodexService({
           .request('turn/interrupt', { threadId: thread.threadId, turnId: turn.id }, 10000)
           .catch(() => {});
       };
-      const resolveCall = (call) =>
+      // `fallback` marks an action Guard Lab chose because the model gave none it could use.
+      const resolveCall = (call, fallback) =>
         finish(null, {
           message: {
             role: 'assistant',
@@ -1771,26 +1824,32 @@ function createCodexService({
             ],
           },
           usage: turn.usage,
-          timing: timing(),
+          timing: timing(fallback),
         });
-      const timing = () => ({
-        decisionMs: Math.round(now() - record.started),
-        model: chosen.model,
-        effort: chosen.effort,
-        serviceTier: chosen.serviceTier,
-        reportedServiceTier: thread.reportedTier ?? null,
-      });
+      const timing = (fallback) => {
+        const value = {
+          decisionMs: Math.round(now() - record.started),
+          model: chosen.model,
+          effort: chosen.effort,
+          serviceTier: chosen.serviceTier,
+          reportedServiceTier: thread.reportedTier ?? null,
+          ...(thread.previousUsage ? { previousUsage: thread.previousUsage } : {}),
+          ...(fallback ? { fallback: fallback.kind, fallbackDetail: fallback.detail } : {}),
+        };
+        thread.previousUsage = null;
+        return value;
+      };
       // The decision is already resolved; stop Codex's follow-up sampling only once it has
       // recorded the code-mode exec output (signalled by the token usage update), or once the
       // model starts writing again. Interrupting earlier aborts the exec and the model's own
       // history then says its action was cancelled.
+      const stop = () => {
+        if (turn.settled) return;
+        turn.settled = true;
+        clearTimeout(turn.cap);
+        interrupt();
+      };
       const stopWhenSettled = () => {
-        const stop = () => {
-          if (turn.settled) return;
-          turn.settled = true;
-          clearTimeout(turn.cap);
-          interrupt();
-        };
         turn.onEvent = (kind, type) => {
           if (kind === 'usage' || (type && type !== 'dynamicToolCall' && type !== 'userMessage'))
             stop();
@@ -1812,7 +1871,7 @@ function createCodexService({
         }
         turn.accepted = { id: `codex-fallback-${crypto.randomUUID()}`, name, args: {} };
         thread.lastSent = input.lastSent;
-        resolveCall(turn.accepted);
+        resolveCall(turn.accepted, { kind: 'invalid_calls', detail: reason });
         stopWhenSettled();
       };
       turn.complete = (completed) => {
@@ -1821,8 +1880,7 @@ function createCodexService({
         idleResolve();
         if (turn.accepted || turn.done) return finish();
         thread.lastSent = input.lastSent;
-        if (record.cancelled)
-          return finish(new CodexError('Codex request cancelled.', { code: 'cancelled' }));
+        if (record.cancelled) return finish(cancelledError());
         if (completed.status === 'failed' || turn.error)
           return finish(
             new CodexError(friendlyError(completed.error || turn.error, { model: chosen.model })),
@@ -1838,21 +1896,10 @@ function createCodexService({
           });
         const name = fallbackTool(request.actor, tools);
         if (name)
-          return finish(null, {
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [
-                {
-                  id: `codex-fallback-${crypto.randomUUID()}`,
-                  type: 'function',
-                  function: { name, arguments: '{}' },
-                },
-              ],
-            },
-            usage: turn.usage,
-            timing: timing(),
-          });
+          return resolveCall(
+            { id: `codex-fallback-${crypto.randomUUID()}`, name, args: {} },
+            { kind: 'no_action', detail: 'Codex finished its turn without a tool call or text.' },
+          );
         return finish(new CodexError('Codex finished without choosing an action.'));
       };
       turn.crash = (reason) => {
@@ -1863,8 +1910,14 @@ function createCodexService({
       };
       turn.cancel = () => {
         interrupt();
-        finish(new CodexError('Codex request cancelled.', { code: 'cancelled' }));
+        finish(cancelledError());
         setTimeout(() => thread.turn === turn && turn.complete({ status: 'interrupted' }), 5000);
+      };
+      // reset(): the thread is being dropped, and its notifications (including the settle signal
+      // of a decision that is already resolved) stop with the unsubscribe. Stop Codex now.
+      turn.drop = () => {
+        stop();
+        turn.crash(cancelledError());
       };
       record.turn = turn;
       thread.turn = turn;
@@ -1922,14 +1975,15 @@ function createCodexService({
     } = data || {};
     if (!Array.isArray(messages) || !messages.length)
       throw new CodexError('Codex request needs messages.');
+    if (id !== undefined && cancelledIds.delete(id)) throw cancelledError();
     const key = `${sessionId}\u0000${actor}`;
-    const record = { id, key, started: now(), cancelled: false, turn: null };
+    const record = { id, key, started: now(), cancelled: false, reset: false, turn: null };
     if (id !== undefined) active.set(id, record);
+    inflight.add(record);
     try {
       return await lock(key, async () => {
         for (let attempt = 0; ; attempt++) {
-          if (record.cancelled)
-            throw new CodexError('Codex request cancelled.', { code: 'cancelled' });
+          if (record.cancelled) throw cancelledError();
           const chosen = chooseSettings(settings);
           let conn, thread;
           try {
@@ -1941,12 +1995,12 @@ function createCodexService({
               chosen,
               sessionId,
               actor,
+              record,
             });
             conn = connection;
             if (!conn || conn.generation !== thread.generation)
               throw new CodexError('Codex restarted.', { code: 'dead' });
-            if (record.cancelled)
-              throw new CodexError('Codex request cancelled.', { code: 'cancelled' });
+            if (record.cancelled) throw cancelledError();
             return await runTurn({ messages, tools, actor }, thread, conn, chosen, record);
           } catch (error) {
             // A crashed App Server restarts transparently: retry once on a fresh process/thread.
@@ -1961,6 +2015,7 @@ function createCodexService({
         }
       });
     } finally {
+      inflight.delete(record);
       if (id !== undefined && active.get(id) === record) active.delete(id);
     }
   }
@@ -1968,19 +2023,30 @@ function createCodexService({
     const { sessionId = 'default', actor = 'robot', system, allTools = [], settings } = data || {};
     const key = `${sessionId}\u0000${actor}`;
     const chosen = chooseSettings(settings);
-    await lock(key, async () => {
-      const thread = await ensureThread({
-        key,
-        system: String(system || ''),
-        allTools,
-        tools: [],
-        chosen,
-        sessionId,
-        actor,
+    const record = { key, cancelled: false, reset: false, turn: null };
+    inflight.add(record);
+    try {
+      await lock(key, async () => {
+        if (record.cancelled) return;
+        const thread = await ensureThread({
+          key,
+          system: String(system || ''),
+          allTools,
+          tools: [],
+          chosen,
+          sessionId,
+          actor,
+          record,
+        });
+        if (!record.cancelled) await warmUp(thread, chosen);
       });
-      await warmUp(thread, chosen);
-    });
-    return { ok: true };
+    } catch (error) {
+      if (error.code !== 'cancelled') throw error;
+    } finally {
+      inflight.delete(record);
+    }
+    // A reset during prepare() is normal (the player left); it is not an error.
+    return record.cancelled ? { ok: false, cancelled: true } : { ok: true };
   }
   /**
    * Codex sets up a thread's session lazily on its first turn (1-2 s before the model is even
@@ -2025,6 +2091,7 @@ function createCodexService({
         interrupt();
         turn.complete();
       };
+      turn.drop = turn.cancel;
       thread.turn = turn;
       timer = setTimeout(() => {
         interrupt();
@@ -2053,24 +2120,32 @@ function createCodexService({
   }
   async function cancel(id) {
     const record = active.get(id);
-    if (!record) return { cancelled: false };
+    if (!record) {
+      // The request may still be on its way (the renderer waits for prepare() first).
+      if (id !== undefined && id !== null) {
+        const time = Date.now();
+        for (const [old, at] of cancelledIds)
+          if (time - at > CANCEL_MEMORY_MS) cancelledIds.delete(old);
+        cancelledIds.set(id, time);
+      }
+      return { cancelled: false };
+    }
     record.cancelled = true;
     record.turn?.cancel();
     return { cancelled: true };
   }
   async function reset(sessionId) {
-    for (const record of active.values())
-      if (
-        sessionId === undefined ||
-        sessionId === null ||
-        record.key.startsWith(`${sessionId}\u0000`)
-      ) {
+    const all = sessionId === undefined || sessionId === null;
+    for (const record of inflight)
+      if (all || record.key.startsWith(`${sessionId}\u0000`)) {
         record.cancelled = true;
+        record.reset = true;
         record.turn?.cancel();
       }
     for (const [key, thread] of threads)
-      if (sessionId === undefined || sessionId === null || thread.sessionId === sessionId) {
-        if (thread.turn?.warmup) thread.turn.cancel();
+      if (all || thread.sessionId === sessionId) {
+        // Also stops a resolved decision that Codex is still settling, before the unsubscribe.
+        thread.turn?.drop();
         threads.delete(key);
         if (connection && !connection.dead && thread.generation === connection.generation)
           connection
@@ -2086,10 +2161,12 @@ function createCodexService({
   function close() {
     closed = true;
     clearTimeout(loginTimer);
-    for (const record of active.values()) {
+    // The process is about to stop, so end every turn here (and its timers) without interrupts.
+    for (const record of inflight) {
       record.cancelled = true;
-      record.turn?.cancel();
+      record.turn?.crash(cancelledError());
     }
+    for (const thread of threads.values()) thread.turn?.crash(cancelledError());
     threads.clear();
     connection?.kill();
     connection = null;
@@ -2125,10 +2202,10 @@ function createCodexService({
   };
 }
 
-function registerCodex({ ipcMain, getWindow, shell } = {}) {
-  const electron = require('electron');
-  const opener = shell || electron.shell;
+function registerCodex({ ipcMain, getWindow, shell, serviceOptions } = {}) {
+  const opener = shell || require('electron').shell;
   const service = createCodexService({
+    ...serviceOptions,
     openExternal: (url) => {
       if (!/^https:\/\//i.test(url)) throw new Error('Refusing to open a non-https sign-in link.');
       return opener.openExternal(url);
@@ -2143,7 +2220,14 @@ function registerCodex({ ipcMain, getWindow, shell } = {}) {
   ipcMain.handle('codex:cancel-login', () => service.cancelLogin());
   ipcMain.handle('codex:models', (_, options) => service.models(options || {}));
   ipcMain.handle('codex:prepare', (_, data) => service.prepare(data || {}));
-  ipcMain.handle('codex:request', (_, data) => service.request(data || {}));
+  // Pausing, restarting or quitting cancels requests all the time; answer that as a value so
+  // Electron does not log it as a failed handler. src/ui/requests.mjs turns it back into an error.
+  ipcMain.handle('codex:request', (_, data) =>
+    service.request(data || {}).catch((error) => {
+      if (error?.code === 'cancelled') return { cancelled: true };
+      throw error;
+    }),
+  );
   ipcMain.handle('codex:cancel', (_, id) => service.cancel(id));
   ipcMain.handle('codex:reset', (_, sessionId) => service.reset(sessionId));
   return { service, close: () => service.close() };

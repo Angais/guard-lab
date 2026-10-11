@@ -59,8 +59,9 @@ export function legPose(distance, progress, index, running = false) {
     Math.acos(clamped((upper * upper + r * r - lower * lower) / (2 * upper * r)));
   return { hip, knee, ankle: -hip - knee, lift };
 }
-export function safeDoorOpenness(open, beforeOpen, t) {
-  if (!open) return 0;
+// closeAt: when an event closes an open door, it swings shut from that moment.
+export function safeDoorOpenness(open, beforeOpen, t, closeAt = null) {
+  if (!open) return beforeOpen === true && closeAt !== null ? 1 - smooth((t - closeAt) / 0.28) : 0;
   return beforeOpen === false ? smooth((t - 0.34) / 0.4) : 1;
 }
 export function impactEnvelope(t, at, duration = 0.2) {

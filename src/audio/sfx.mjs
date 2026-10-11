@@ -3,12 +3,51 @@ let context,
   dry,
   wet,
   enabled = true;
+// Effects level against dialogue (about -17 dBFS): a gunshot peaks well above speech, footsteps
+// and interface blips sit clearly below it. The limiter catches the loudest peaks.
+const MASTER = 1.8;
 const noiseCache = new Map();
+
+// xorshift white noise in -1..1; the seed decorrelates channels.
+function fillNoise(data, seed) {
+  for (let i = 0; i < data.length; i++) {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    data[i] = (seed >>> 0) / 2147483648 - 1;
+  }
+}
+
+/**
+ * Room response: decorrelated noise per channel with an exponential decay (RT60 ~0.55 s) and a
+ * two-pole low-pass (about 5.5 kHz, darker as it decays), like a small concrete room.
+ */
+function roomImpulse(ctx) {
+  const rate = ctx.sampleRate,
+    impulse = ctx.createBuffer(2, Math.round(rate * 0.8), rate),
+    predelay = Math.round(rate * 0.008);
+  for (let c = 0; c < 2; c++) {
+    const data = impulse.getChannelData(c);
+    fillNoise(data, 0x9e3779b9 ^ ((c + 1) * 0x85ebca6b));
+    let low = 0,
+      lower = 0;
+    for (let i = 0; i < data.length; i++) {
+      const t = Math.max(0, i - predelay) / rate,
+        cutoff = 4800 * Math.exp(-t * 2.2) + 700,
+        k = 1 - Math.exp((-2 * Math.PI * cutoff) / rate);
+      low += k * (data[i] - low);
+      lower += k * (low - lower);
+      data[i] = i < predelay ? 0 : lower * Math.exp((-6.91 * t) / 0.55);
+    }
+  }
+  return impulse;
+}
+
 function audio() {
   if (!context) {
     context = new AudioContext();
     master = context.createGain();
-    master.gain.value = 0.65;
+    master.gain.value = MASTER;
     const limiter = context.createDynamicsCompressor();
     limiter.threshold.value = -8;
     limiter.knee.value = 10;
@@ -21,21 +60,14 @@ function audio() {
     dry.gain.value = 0.85;
     dry.connect(master);
     wet = context.createConvolver();
-    const impulse = context.createBuffer(2, context.sampleRate * 0.85, context.sampleRate);
-    for (let c = 0; c < 2; c++) {
-      const data = impulse.getChannelData(c);
-      for (let i = 0; i < data.length; i++)
-        data[i] =
-          Math.sin(i * 78.233 + c * 24) *
-          Math.sin(i * 12.9898) *
-          Math.pow(1 - i / data.length, 3) *
-          0.15;
-    }
-    wet.buffer = impulse;
-    const room = context.createGain();
-    room.gain.value = 0.2;
-    wet.connect(room);
-    room.connect(master);
+    wet.buffer = roomImpulse(context);
+    // The return sits about 16 dB under the direct sound; low rumble stays dry so it doesn't boom.
+    const room = context.createGain(),
+      clean = context.createBiquadFilter();
+    room.gain.value = 0.6;
+    clean.type = 'highpass';
+    clean.frequency.value = 150;
+    wet.connect(clean).connect(room).connect(master);
   }
   if (context.state === 'suspended') context.resume();
   return context;
@@ -47,21 +79,14 @@ export function unlockAudio() {
 }
 export function setSoundEnabled(value) {
   enabled = value;
-  if (master) master.gain.setTargetAtTime(value ? 0.65 : 0, context.currentTime, 0.03);
+  if (master) master.gain.setTargetAtTime(value ? MASTER : 0, context.currentTime, 0.03);
 }
 function noise(seconds) {
   const ctx = audio(),
     key = Math.round(seconds * 100);
   if (noiseCache.has(key)) return noiseCache.get(key);
-  const b = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * seconds), ctx.sampleRate),
-    d = b.getChannelData(0);
-  let seed = 917251;
-  for (let i = 0; i < d.length; i++) {
-    seed ^= seed << 13;
-    seed ^= seed >>> 17;
-    seed ^= seed << 5;
-    d[i] = (seed >>> 0) / 2147483648 - 1;
-  }
+  const b = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * seconds), ctx.sampleRate);
+  fillNoise(b.getChannelData(0), 917251);
   noiseCache.set(key, b);
   return b;
 }
@@ -104,8 +129,29 @@ function layer({
   node.start(start);
   node.stop(start + duration + 0.03);
 }
+// Per-sound level trims (mix balance; 1 = as voiced below).
+const LEVELS = {
+  gunshot: 1.8,
+  taser: 2.5,
+  explosion: 1.25,
+  impact: 1.6,
+  punch: 1.5,
+  airsoft: 1.4,
+  footstep: 2,
+  'spring-wind': 2,
+  scan: 1.4,
+  item: 1.4,
+  keypad: 3,
+  warning: 2.2,
+  switch: 3,
+  lockpick: 3,
+  recorder: 2.5,
+  paper: 2,
+};
+
 export function playSound(name, { force = 1, pan = 0 } = {}) {
   if (!enabled) return;
+  force *= LEVELS[name] ?? 1;
   try {
     const n = (duration, volume, filter, delay = 0) =>
       layer({ noiseSource: true, duration, volume: volume * force, filter, delay, pan });
@@ -221,6 +267,31 @@ export function playSound(name, { force = 1, pan = 0 } = {}) {
       t(140, 85, 0.6, 0.11, 'sawtooth');
       n(0.4, 0.1, 900);
       n(0.07, 0.2, 2600, 0.55);
+    } else if (name === 'mic-ready') {
+      // Push-to-talk: the microphone is open, speak now.
+      t(1180, 1180, 0.045, 0.18);
+    } else if (name === 'siren') {
+      // Security called: two rising whoops.
+      for (const delay of [0, 0.62]) {
+        t(470, 1120, 0.56, 0.12, 'triangle', delay);
+        t(940, 2240, 0.56, 0.018, 'sawtooth', delay);
+      }
+    } else if (name === 'security-tick') {
+      // One round closer to security arriving (louder `force` near the end).
+      t(1560, 1480, 0.035, 0.24, 'triangle');
+      n(0.012, 0.2, 6000);
+    } else if (name === 'security-arrival') {
+      n(0.08, 0.2, 2400);
+      t(150, 80, 0.4, 0.14, 'sawtooth');
+      t(660, 660, 0.17, 0.1, 'triangle', 0.08);
+      t(880, 880, 0.17, 0.1, 'triangle', 0.28);
+      t(660, 660, 0.3, 0.1, 'triangle', 0.48);
+    } else if (name === 'slip') {
+      // Shoe squeak on the wet floor, then a splash.
+      t(1500, 2700, 0.11, 0.05, 'sine');
+      t(2100, 1700, 0.08, 0.025, 'triangle', 0.06);
+      n(0.3, 0.16, 3200, 0.1);
+      n(0.12, 0.08, 900, 0.12);
     }
   } catch {}
 }

@@ -14,6 +14,10 @@ import {
 import { createMessages, compactContext } from '../src/sim/agent.mjs';
 import { initialState, applyHuman, observe } from '../src/sim/engine.mjs';
 import { toolSchemas } from '../src/sim/tools.mjs';
+import { allHumanToolSchemas, humanMessages } from '../src/sim/human-agent.mjs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { ROOT } from '../scripts/paths.mjs';
 const request = (id = 'turn-1') => {
   const h = applyHuman(
     initialState('thief-uniform', undefined, '9327', 1, { item: 'replica' }),
@@ -151,6 +155,50 @@ test('custom prompt examples cannot shadow the actual private combination memory
       JSON.parse((await pending).message.tool_calls[0].function.arguments).message,
       '9327',
     );
+  } finally {
+    await removeTemporary(directory);
+  }
+});
+test('every tool that needs arguments has a CLI shortcut; pick_up takes its object', async () => {
+  const directory = await temporaryDirectory('guard-pickup-');
+  try {
+    const id = '00000003-1111-4111-8111-111111111111';
+    const pending = requestTurn(
+      directory,
+      {
+        id,
+        actor: 'human',
+        messages: [
+          ...humanMessages('thief-uniform'),
+          { role: 'user', content: JSON.stringify({ turn: 3 }) },
+        ],
+        tools: allHumanToolSchemas().filter((t) => ['pick_up', 'wait'].includes(t.function.name)),
+      },
+      { timeoutMs: 5000 },
+    );
+    await waitForTurn(directory, { timeoutMs: 1000 });
+    const child = spawn(
+      process.execPath,
+      ['scripts/robot-link.mjs', 'act', 'pick_up', 'original', '--id=00000003', '--actor=human'],
+      {
+        cwd: ROOT,
+        env: { ...process.env, GUARD_LAB_HUMAN_BRIDGE: directory },
+        windowsHide: true,
+        stdio: 'ignore',
+      },
+    );
+    assert.equal((await once(child, 'close'))[0], 0);
+    const call = (await pending).message.tool_calls[0].function;
+    assert.equal(call.name, 'pick_up');
+    assert.deepEqual(JSON.parse(call.arguments), { object: 'original' });
+    // Every argument-taking tool is covered by a positional shortcut in robot-link.mjs.
+    const source = await fs.readFile(path.join(ROOT, 'scripts', 'robot-link.mjs'), 'utf8');
+    for (const tool of [...allHumanToolSchemas(), ...toolSchemas()])
+      if (tool.function.parameters?.required?.length)
+        assert.ok(
+          source.includes(`'${tool.function.name}'`),
+          `${tool.function.name} needs a positional shortcut in scripts/robot-link.mjs`,
+        );
   } finally {
     await removeTemporary(directory);
   }

@@ -1,19 +1,27 @@
 import React, { useState } from 'react';
 import { ChevronDown, Play, Radio, RotateCcw, WandSparkles } from 'lucide-react';
 import { TOOLS, DEFAULT_PROMPT } from '../sim/tools.mjs';
-import { OllamaPicker, isOllamaEndpoint } from './OllamaPicker.jsx';
+import { DEFAULT_VOICES, voiceInfo } from '../../shared/voice-catalog.mjs';
+import { OllamaPicker } from './OllamaPicker.jsx';
 import { Button, Field, Segmented, Spinner, Toggle } from './kit.jsx';
 import { Drawer } from './Overlays.jsx';
 import {
   CodexActions,
   CodexStatusLine,
+  LicenseLink,
   MicTest,
   Status,
   VoiceModelActions,
   VoiceModelStatus,
   micBlockedText,
 } from './SetupParts.jsx';
-import { PUSH_TO_TALK_KEYS, effortLabel, resolveCodexSettings } from './config.mjs';
+import {
+  PUSH_TO_TALK_KEYS,
+  connectionError,
+  effortLabel,
+  isOllamaEndpoint,
+  resolveCodexSettings,
+} from './config.mjs';
 
 export const GUARD_MODES = [
   { value: 'codex', label: 'Codex' },
@@ -122,7 +130,7 @@ export function ApiSettings({ endpoint, model, apiKey, onChange, onApiKey, actor
       const result = await window.desktop.testModel({ endpoint, apiKey });
       setTest({ ok: true, models: result.models || [] });
     } catch (error) {
-      setTest({ ok: false, message: error.message });
+      setTest({ ok: false, message: connectionError(error, endpoint) });
     } finally {
       setTesting(false);
     }
@@ -309,7 +317,8 @@ function Advanced({ config, onConfig, onCodex, onPathCommit }) {
   );
 }
 
-function VoiceSelect({ value, voices, onChange, onPreview, auto, label }) {
+// Lists the voices the voice layer reports; `standard` marks the game's default for this actor.
+function VoiceSelect({ value, voices, onChange, onPreview, auto, label, standard }) {
   return (
     <Field label={label}>
       <span className="select-row">
@@ -319,9 +328,12 @@ function VoiceSelect({ value, voices, onChange, onPreview, auto, label }) {
             <option key={v.id} value={v.id}>
               {v.name}
               {v.accent ? ` · ${v.accent}` : ''}
+              {standard?.includes(v.id) ? ' · default' : ''}
             </option>
           ))}
-          {value && !voices.some((v) => v.id === value) && <option value={value}>{value}</option>}
+          {value && !voices.some((v) => v.id === value) && (
+            <option value={value}>{voiceInfo(value)?.name || value}</option>
+          )}
         </select>
         <button
           type="button"
@@ -349,6 +361,7 @@ export function SettingsDrawer({
   apiKey,
   onApiKey,
   onCopyFix,
+  onCopyLink,
   onPreviewVoice,
   onMicError,
   onRunSetup,
@@ -431,6 +444,7 @@ export function SettingsDrawer({
               label="Guard voice"
               value={config.voice.guardVoice}
               voices={voice.voices}
+              standard={[DEFAULT_VOICES.robot]}
               onChange={(guardVoice) => updateVoice({ guardVoice })}
               onPreview={() => onPreviewVoice('robot', config.voice.guardVoice)}
             />
@@ -439,6 +453,7 @@ export function SettingsDrawer({
               value={config.voice.humanVoice}
               voices={voice.voices}
               auto="Match appearance"
+              standard={[DEFAULT_VOICES.male, DEFAULT_VOICES.female]}
               onChange={(humanVoice) => updateVoice({ humanVoice })}
               onPreview={() => onPreviewVoice('human', config.voice.humanVoice)}
             />
@@ -447,14 +462,15 @@ export function SettingsDrawer({
             <div className="model-row">
               <div>
                 <strong>
-                  Kokoro <span className="setup-tag">natural voices</span>
+                  {tts?.model || 'Voice model'} <span className="setup-tag">natural voices</span>
                 </strong>
                 <VoiceModelStatus
                   component={tts}
-                  missingText={`Not installed · ${tts?.sizeLabel || '96 MB'}. Uses your system voice until then.`}
+                  missingText={`Not installed${tts?.sizeLabel ? ` · ${tts.sizeLabel}` : ''}. Uses your system voice until then.`}
                 />
               </div>
               <span className="model-actions">
+                {tts?.state !== 'installing' && <LicenseLink component={tts} onCopy={onCopyLink} />}
                 <VoiceModelActions
                   component={tts}
                   onInstall={() => voice.install('tts')}
@@ -463,6 +479,7 @@ export function SettingsDrawer({
               </span>
             </div>
           )}
+          <p className="setting-foot">Voices are AI-generated.</p>
           <h3>Voice input</h3>
           <Toggle
             label="Talk with your mic"
@@ -483,14 +500,14 @@ export function SettingsDrawer({
             <div className="model-row">
               <div>
                 <strong>
-                  Whisper <span className="setup-tag">speech to text</span>
+                  {stt?.model || 'Whisper'} <span className="setup-tag">speech to text</span>
                 </strong>
                 {stt?.state === 'ready' && micDenied ? (
                   <Status tone="danger">{micBlockedText(platform)}</Status>
                 ) : (
                   <VoiceModelStatus
                     component={stt}
-                    missingText={`Not installed · ${stt?.sizeLabel || '130 MB'}`}
+                    missingText={`Not installed${stt?.sizeLabel ? ` · ${stt.sizeLabel}` : ''}`}
                   />
                 )}
               </div>
@@ -506,7 +523,7 @@ export function SettingsDrawer({
             </div>
           )}
           {!voice.available && (
-            <p className="setting-help">Kokoro voices and Whisper input need the desktop app.</p>
+            <p className="setting-help">Spoken voices and voice input need the desktop app.</p>
           )}
         </section>
       )}
@@ -514,7 +531,7 @@ export function SettingsDrawer({
         <section className="settings-section">
           <Toggle
             label="Show hints"
-            description="A short tip during your first turns."
+            description="A short tip in your first turns, for your first few games."
             checked={config.showHints}
             onChange={(showHints) => onConfig({ showHints })}
           />

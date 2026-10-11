@@ -39,7 +39,7 @@ npm run docs:generate
 npm run check
 ```
 
-`npm run dev` runs a loopback renderer preview, which supports scripted mode; direct models/live IPC require the Electron app. For renderer-only visual checks, `npm run dev` plus `?showcase=1` previews the same generated demo in development mode. `npm run showcase` opens deterministic chapters demonstrating every guard tool and equipment warning. It resets fatalities between chapters. Showcase data is generated from current code, not a checked-in user recording.
+`npm start` runs Electron against the Vite dev server with live reload and Electron's default menu (Reload, Developer Tools). `npm run play` runs the built app as players see it: a separate process, no Reload or DevTools menu items. Packaged builds ignore `--dev-url`. `npm run dev` runs a loopback renderer preview, which supports scripted mode; direct models/live IPC require the Electron app. For renderer-only visual checks, `npm run dev` plus `?showcase=1` previews the same generated demo in development mode. `npm run showcase` opens deterministic chapters demonstrating every guard tool and equipment warning. It resets fatalities between chapters. Showcase data is generated from current code, not a checked-in user recording.
 
 ## Change balance or run a reproducible scenario
 
@@ -69,4 +69,6 @@ Seeded rules, audiovisual presentation and model decisions are separate. Prompt 
 
 The repository excludes local development patch scripts, unused old room renderers, runtime assets and private data. Publish through the audited source exporter rather than zipping an arbitrary working directory. See [RELEASE.md](RELEASE.md).
 
-`npm run test:desktop` additionally verifies the built renderer, sandboxed preload, actual Electron bridge and independent provider connections using a local mock endpoint. It uses an isolated temporary data root and requires a graphical session. It does not contact a real model provider or assert an LLM's behavior.
+`npm run test:desktop` additionally verifies the built renderer and its WebGL room (falling back to CPU rendering without a GPU), the game menu without Reload/DevTools, sandboxed preload, actual Electron bridge and independent provider connections using a local mock endpoint. It uses an isolated temporary data root and requires a graphical session (on Linux CI, `xvfb-run`). It does not contact a real model provider or assert an LLM's behavior. After `npm run dist`, `npm run verify:package` checks and launches the package; see [RELEASE.md](RELEASE.md).
+
+Runtime `dependencies` in `package.json` are only what the Electron main process loads (the speech stack). Renderer libraries are `devDependencies` because Vite bundles them into `dist`; electron-builder copies `dependencies` into app.asar, and its config leaves out the parts of that graph that only install scripts or browsers load.

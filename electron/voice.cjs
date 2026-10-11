@@ -1,4 +1,4 @@
-// Local voice service for the renderer: Kokoro speech, Whisper push-to-talk transcription and
+// Local voice service for the renderer: Supertonic speech, Whisper push-to-talk transcription and
 // microphone permission. Models run in a utilityProcess (voice-worker.cjs) forked on demand.
 const path = require('node:path');
 const fs = require('node:fs/promises');
@@ -11,8 +11,9 @@ const MAX_TEXT = 2000;
 const MAX_SECONDS = 60;
 const CACHE_BYTES = 64 * 1024 * 1024;
 const CACHE_FILES = 800;
-// Marks a cache written by this version; older caches (Piper) also held the player's lines.
-const CACHE_MARKER = '.kokoro-cache-v1';
+// Marks a cache written by this version. Older caches (Piper, Kokoro) are deleted: Piper's also
+// held the player's lines, and no other voice model can use them.
+const CACHE_MARKER = '.speech-cache-v2';
 // Human lines are never written to disk: a small in-memory cache only.
 const MEMORY_BYTES = 12 * 1024 * 1024;
 const MEMORY_ITEMS = 32;
@@ -67,7 +68,7 @@ function registerVoice({ ipcMain, getWindow, app, electron = require('electron')
   const pending = new Map(),
     installing = {},
     failures = {},
-    // Kokoro jobs not yet handed to the worker, oldest first; jobs by cache key (incl. active).
+    // Speech jobs not yet handed to the worker, oldest first; jobs by cache key (incl. active).
     synthQueue = [],
     synthJobs = new Map(),
     // Owners cancelled recently: their requests still in flight are dropped on arrival.
@@ -250,7 +251,7 @@ function registerVoice({ ipcMain, getWindow, app, electron = require('electron')
         )
       )
         return;
-      // First run of this version: drop older caches, which also held the player's lines.
+      // First run of this version: drop older caches (other voice models, the player's lines).
       await fs.rm(cacheDir, { recursive: true, force: true });
       await fs.mkdir(cacheDir, { recursive: true, mode: 0o700 });
       await fs.writeFile(marker, '', { mode: 0o600 });
@@ -360,7 +361,7 @@ function registerVoice({ ipcMain, getWindow, app, electron = require('electron')
       job.resolve({ cancelled: true });
       dropped++;
     }
-    // The job the worker is running stops before its next Kokoro pass.
+    // The job the worker is running stops before its next synthesis step.
     const active = synthActive;
     if (active && !active.settled && !active.keep) {
       for (const owner of owners) active.owners.delete(owner);
@@ -529,7 +530,7 @@ function registerVoice({ ipcMain, getWindow, app, electron = require('electron')
     started = true;
     setupPermissions();
     if (process.argv.includes('--test-desktop')) return;
-    // Warm Kokoro after the window has painted so the guard's first line starts quickly.
+    // Warm Supertonic after the window has painted so the guard's first line starts quickly.
     setTimeout(async () => {
       if (!closed && (await component('tts').catch(() => null))?.state === 'ready')
         request('warm', { kind: 'tts' }).catch(() => {});

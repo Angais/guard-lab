@@ -78,7 +78,7 @@ test('human action schemas cover all gadgets, gun targets and stun speech-only r
     s = applyTool(close, 'discharge_taser').state;
   assert.deepEqual(
     humanToolSchemas(s).map((t) => t.function.name),
-    ['talk'],
+    ['talk', 'wait'],
   );
 });
 test('human AI takes only the first call and hearing robot dialogue can convey a deliberately spoken code', async () => {

@@ -11,8 +11,18 @@ import {
   runtimeFailure,
 } from '../shared/voice-models.mjs';
 const require = createRequire(import.meta.url);
-const major = Number(process.versions.node.split('.')[0]);
-const checks = [{ name: 'Node.js 22 or newer', ok: major >= 22 }];
+// Electron 44 and Vite 7 need Node.js 22.12 (require of ES modules) or newer.
+const [major, minor] = process.versions.node.split('.').map(Number);
+const checks = [
+  { name: 'Node.js 22.12 or newer', ok: major > 22 || (major === 22 && minor >= 12) },
+];
+const { version } = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
+const git = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+  cwd: ROOT,
+  encoding: 'utf8',
+  windowsHide: true,
+});
+const commit = git.status === 0 ? git.stdout.trim() : null;
 for (const name of ['vite', 'electron']) {
   try {
     require.resolve(name);
@@ -48,11 +58,11 @@ try {
 const display =
   process.platform !== 'linux' || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 checks.push({ name: 'Desktop display (needed for 3D app, not tests/bridge)', ok: display });
-// Local speech: Kokoro (voices) and Whisper (push-to-talk) run through onnxruntime-node.
+// Local speech: Supertonic (voices) and Whisper (push-to-talk) run through onnxruntime-node.
 async function checkVoice() {
   const voiceChecks = [];
   try {
-    for (const name of ['kokoro-js', '@huggingface/transformers']) require.resolve(name);
+    for (const name of ['onnxruntime-node', '@huggingface/transformers']) require.resolve(name);
     const runtime = createRequire(require.resolve('@huggingface/transformers'));
     const ort = path.dirname(runtime.resolve('onnxruntime-node/package.json'));
     const binding = path.join(ort, 'bin', 'napi-v3', process.platform, process.arch);
@@ -126,6 +136,8 @@ console.log(
   JSON.stringify(
     {
       ok: checks.every((c) => c.ok),
+      version,
+      ...(commit ? { commit } : {}),
       platform: process.platform,
       arch: process.arch,
       node: process.versions.node,

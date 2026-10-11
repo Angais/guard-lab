@@ -112,6 +112,8 @@ test('restoring camera sight exposes current evidence without granting hidden st
   s = applyTool(s, 'remove_camera_cover').state;
   s = applyHuman(s, 'combination', { code: '9327' }).state;
   s = applyTool(s, 'remove_camera_cover').state;
+  s = applyHuman(s, 'touch_safe').state;
+  s = applyTool(s, 'remove_camera_cover').state;
   const o = observe(s);
   assert.equal(o.camera.safeDoor, 'open');
   assert.equal(o.camera.humanLocation, 'safe');

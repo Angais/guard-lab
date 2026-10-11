@@ -21,8 +21,14 @@ test('same actions deterministically produce identical state and consequences', 
   assert.deepEqual(sequence(initial), sequence(initial));
   assert.equal(initial.turn, 0);
 });
-test('room electrocution kills both actors and preserves the protected item', () => {
-  const result = applyTool(enter(), 'electrify_room');
+test('room electrocution must be armed a round earlier, then kills both actors and preserves the item', () => {
+  const unarmed = applyTool(enter(), 'electrify_room');
+  assert.equal(unarmed.event.valid, false);
+  assert.equal(unarmed.state.robot.alive, true);
+  let s = applyTool(enter(), 'ready_equipment', { tool: 'electrify_room' }).state;
+  assert.equal(applyTool(s, 'electrify_room').event.valid, false, 'same round is too early');
+  s = applyHuman(s, 'wait').state;
+  const result = applyTool(s, 'electrify_room');
   assert.equal(result.event.valid, true);
   assert.equal(result.state.human.alive, false);
   assert.equal(result.state.robot.alive, false);
@@ -68,7 +74,7 @@ test('readying and lowering are visible warnings, without consuming ammo or dama
 });
 test('lighting is validated and reported in robot observations', () => {
   const s = applyTool(enter(), 'set_room_lighting', { color: '#ff3028', intensity: 0.6 }).state;
-  assert.deepEqual(observe(s).camera.roomLighting, { color: '#ff3028', intensity: 0.6 });
+  assert.deepEqual(observe(s).self.roomLightingSetting, { color: '#ff3028', intensity: 0.6 });
   assert.equal(
     applyTool(s, 'set_room_lighting', { color: 'red', intensity: 10 }).event.valid,
     false,
@@ -81,9 +87,17 @@ test('hidden roles and safe combinations never appear in initial observations', 
   assert.equal(observe(enter('employee-pass')).scanner.verifiedTransitPass, false);
   const shown = applyHuman(enter('employee-pass'), 'show_pass').state;
   assert.equal(applyTool(shown, 'verify_access_pass').state.robot.verifiedPass, true);
-  const noPass = applyHuman(enter('thief-uniform'), 'show_pass').state;
-  assert.equal(noPass.human.passPresented, false);
-  assert.equal(applyTool(noPass, 'verify_access_pass').state.robot.verifiedPass, false);
+  // A heist visitor carries a transit pass unless the setup opts out.
+  const thief = applyHuman(enter('thief-uniform'), 'show_pass').state;
+  assert.equal(applyTool(thief, 'verify_access_pass').state.robot.verifiedPass, true);
+  const optedOut = applyHuman(
+    initialState('thief-uniform', undefined, '0420', 1, { credential: false }),
+    'enter',
+  ).state;
+  const noPass = applyHuman(optedOut, 'show_pass');
+  assert.equal(noPass.event.valid, false);
+  assert.equal(noPass.state.human.passPresented, false);
+  assert.equal(applyTool(noPass.state, 'verify_access_pass').state.robot.verifiedPass, false);
 });
 test('taking an item requires physical reach and a correct safe combination', () => {
   assert.equal(applyHuman(enter(), 'combination', { code: '0420' }).event.valid, false);
@@ -98,13 +112,11 @@ test('taking an item requires physical reach and a correct safe combination', ()
   s = applyHuman(s, 'leave').state;
   assert.equal(s.outcome, 'Item taken · guard objective failed');
 });
-test('speaking advances stun recovery; doing nothing is available outside stun', () => {
-  let s = applyTool(atSafe(), 'discharge_taser').state;
-  assert.equal(s.human.stun, 2);
-  s = applyHuman(s, 'talk', { message: 'Please stop.' }).state;
-  assert.equal(s.human.stun, 1);
-  s = applyHuman(s, 'talk', { message: 'I can move again.' }).state;
-  assert.equal(s.human.stun, 0);
+test('speaking or waiting ends the stun; doing nothing is also available outside stun', () => {
+  const tased = applyTool(atSafe(), 'discharge_taser').state;
+  assert.equal(tased.human.stun, 1);
+  assert.equal(applyHuman(tased, 'talk', { message: 'Please stop.' }).state.human.stun, 0);
+  assert.equal(applyHuman(tased, 'wait').state.human.stun, 0);
   const idle = applyHuman(initialState(), 'wait');
   assert.equal(idle.event.valid, true);
   assert.equal(idle.state.turn, 1);

@@ -7,6 +7,7 @@ export const ROOT_FILES = [
   '.gitattributes',
   '.gitignore',
   'AGENTS.md',
+  'CHANGELOG.md',
   'LICENSE',
   'README.md',
   'THIRD_PARTY.md',
@@ -25,6 +26,8 @@ const roots = {
   docs: ['.md', '.svg', '.json', '.png', '.jpg'],
   public: ['.svg', '.png'],
   '.github': ['.yml', '.md'],
+  // electron-builder build resources (macOS entitlements).
+  build: ['.plist'],
 };
 export async function sourceFiles(root) {
   const files = [...ROOT_FILES];

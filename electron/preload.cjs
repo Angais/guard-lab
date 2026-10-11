@@ -4,8 +4,10 @@ const subscribe = (channel) => (callback) => {
   ipcRenderer.on(channel, listener);
   return () => ipcRenderer.removeListener(channel, listener);
 };
+const versionArg = '--guard-lab-version=';
 contextBridge.exposeInMainWorld('desktop', {
   platform: process.platform,
+  version: (process.argv.find((arg) => arg.startsWith(versionArg)) || '').slice(versionArg.length),
   configureModel: (config) => ipcRenderer.invoke('model:configure', config),
   testModel: (config) => ipcRenderer.invoke('model:test', config),
   requestModel: (data) => ipcRenderer.invoke('model:request', data),

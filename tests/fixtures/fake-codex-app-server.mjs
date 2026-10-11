@@ -354,7 +354,11 @@ function handle(message) {
       return fail(-32600, `The model ${params.model} does not exist or you do not have access.`);
     const number = state.thread + 1;
     writeState({ ...state, thread: number });
-    return reply({
+    // A real thread/start can take a second or more (the window prepare() covers).
+    const answer = scenario.threadStartDelayMs
+      ? (result) => setTimeout(() => reply(result), scenario.threadStartDelayMs)
+      : reply;
+    return answer({
       thread: { id: `thr-${process.pid}-${number}`, ephemeral: true },
       model: params.model,
       modelProvider: 'openai',

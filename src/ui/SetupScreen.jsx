@@ -4,6 +4,7 @@ import { Button } from './kit.jsx';
 import {
   CodexActions,
   CodexStatusLine,
+  LicenseLink,
   MicTest,
   SetupRow,
   Status,
@@ -20,6 +21,7 @@ export function SetupScreen({
   config,
   platform,
   onCopyFix,
+  onCopyLink,
   onModel,
   onTestVoice,
   onMicError,
@@ -34,7 +36,7 @@ export function SetupScreen({
   const fallback =
     codexMode && ['missing', 'error', 'signed-out'].includes(codex.status?.state || 'missing');
   const micDenied = voice.status?.microphone === 'denied';
-  const size = (component, label) => component?.sizeLabel || label;
+  const size = (component) => (component?.sizeLabel ? ` · ${component.sizeLabel}` : '');
   return (
     <div className="setup-screen" role="dialog" aria-modal="true" aria-labelledby="setup-title">
       <div className="setup-card">
@@ -55,15 +57,16 @@ export function SetupScreen({
           <SetupRow
             icon={AudioLines}
             title="Voices"
-            tag="Kokoro"
+            tag={tts?.model}
             tone={tts?.state === 'ready' ? 'ok' : undefined}
             status={
               <VoiceModelStatus
                 component={tts}
-                missingText={`Natural voices for the guard and you · ${size(tts, '96 MB')}`}
+                missingText={`Voices for the guard and you${size(tts)}`}
               />
             }
           >
+            {tts?.state !== 'installing' && <LicenseLink component={tts} onCopy={onCopyLink} />}
             <VoiceModelActions component={tts} onInstall={() => voice.install('tts')}>
               <TestVoiceButton onTest={onTestVoice} />
             </VoiceModelActions>
@@ -71,7 +74,7 @@ export function SetupScreen({
           <SetupRow
             icon={Mic}
             title="Voice input"
-            tag="Whisper"
+            tag={stt?.model || 'Whisper'}
             tone={stt?.state === 'ready' && !micDenied ? 'ok' : undefined}
             status={
               stt?.state === 'ready' && micDenied ? (
@@ -79,7 +82,7 @@ export function SetupScreen({
               ) : (
                 <VoiceModelStatus
                   component={stt}
-                  missingText={`Talk to the guard: hold ${keyLabel(config.voice.pushToTalkKey)} · ${size(stt, '130 MB')}`}
+                  missingText={`Talk to the guard: hold ${keyLabel(config.voice.pushToTalkKey)} ${size(stt)}`}
                 />
               )
             }

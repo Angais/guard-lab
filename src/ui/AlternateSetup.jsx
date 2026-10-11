@@ -1,6 +1,6 @@
 import React from 'react';
 import { ArrowLeft, ArrowRight } from 'lucide-react';
-import { Button, Segmented } from './kit.jsx';
+import { Button, Segmented, Toggle } from './kit.jsx';
 import { GuardChip, RoleCards, CredentialPicker } from './Home.jsx';
 import { ApiSettings, GUARD_MODES, ModeHelp } from './SettingsDrawer.jsx';
 
@@ -56,9 +56,26 @@ export function AlternateSetup({
       </div>
       <div className="home-step">
         <h2>The visitor’s private objective</h2>
-        <RoleCards role={role} onChange={onRole} compact />
-        <CredentialPicker role={role} config={config} onChange={onChange} />
+        {/* As G-01 you are meant to work the objective out; by default it is drawn in secret. */}
+        {sessionType === 'duel' || config.chooseVisitor ? (
+          <>
+            <RoleCards role={role} onChange={onRole} compact />
+            <CredentialPicker role={role} config={config} onChange={onChange} />
+          </>
+        ) : (
+          <p className="home-lead secret-objective">
+            Drawn in secret: Transit or Heist, with or without a pass. You find out at the end.
+          </p>
+        )}
         <p className="home-note">The visitor picks its own item.</p>
+        {sessionType === 'guard' && (
+          <Toggle
+            label="Choose it myself"
+            description="Spoils the game: you’d know what you’re meant to work out."
+            checked={Boolean(config.chooseVisitor)}
+            onChange={(chooseVisitor) => onChange({ chooseVisitor })}
+          />
+        )}
       </div>
       <div className="home-step">
         <h2>Who plays the visitor?</h2>

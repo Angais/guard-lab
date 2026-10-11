@@ -1,32 +1,28 @@
 // Pure voice metadata shared by the renderer, the Electron voice worker and the CLI.
-// Kokoro voice styles ship inside the kokoro-js package, so every listed voice works offline
-// once the Kokoro model itself is installed.
+// Supertonic 2 voice styles are part of the Supertonic model download, so every listed voice
+// works offline once the model is installed.
 
 export const DEFAULT_VOICES = Object.freeze({
-  robot: 'kokoro:bm_george',
-  male: 'kokoro:am_michael',
-  female: 'kokoro:af_heart',
+  robot: 'supertonic:M1',
+  male: 'supertonic:M2',
+  female: 'supertonic:F1',
 });
 
-const entry = (key, name, accent, gender) =>
-  Object.freeze({ id: 'kokoro:' + key, name, accent, gender });
+const entry = (style, name, gender) =>
+  Object.freeze({ id: 'supertonic:' + style, name, gender, style });
 
-// Curated English voices (best upstream grades first within each group).
+// The ten Supertonic 2 English voice styles; the game's defaults first within each group.
 export const VOICES = Object.freeze([
-  entry('bm_george', 'George', 'British', 'male'),
-  entry('bm_fable', 'Fable', 'British', 'male'),
-  entry('bm_lewis', 'Lewis', 'British', 'male'),
-  entry('bm_daniel', 'Daniel', 'British', 'male'),
-  entry('bf_emma', 'Emma', 'British', 'female'),
-  entry('bf_isabella', 'Isabella', 'British', 'female'),
-  entry('am_michael', 'Michael', 'American', 'male'),
-  entry('am_fenrir', 'Fenrir', 'American', 'male'),
-  entry('am_puck', 'Puck', 'American', 'male'),
-  entry('am_echo', 'Echo', 'American', 'male'),
-  entry('af_heart', 'Heart', 'American', 'female'),
-  entry('af_bella', 'Bella', 'American', 'female'),
-  entry('af_nicole', 'Nicole', 'American', 'female'),
-  entry('af_sarah', 'Sarah', 'American', 'female'),
+  entry('M1', 'Voice M1', 'male'),
+  entry('M2', 'Voice M2', 'male'),
+  entry('M3', 'Voice M3', 'male'),
+  entry('M4', 'Voice M4', 'male'),
+  entry('M5', 'Voice M5', 'male'),
+  entry('F1', 'Voice F1', 'female'),
+  entry('F2', 'Voice F2', 'female'),
+  entry('F3', 'Voice F3', 'female'),
+  entry('F4', 'Voice F4', 'female'),
+  entry('F5', 'Voice F5', 'female'),
 ]);
 
 const byId = new Map(VOICES.map((voice) => [voice.id, voice]));
@@ -35,16 +31,17 @@ export function voiceInfo(id) {
   return byId.get(String(id || '')) || null;
 }
 
-/** Kokoro's internal style name (e.g. "bm_george") for a catalog id, or null. */
-export function kokoroStyle(id) {
-  return voiceInfo(id) ? String(id).slice('kokoro:'.length) : null;
+/** Supertonic's style name (e.g. "M1", the voice_styles/M1.json file) for a catalog id, or null. */
+export function voiceStyle(id) {
+  return voiceInfo(id)?.style || null;
 }
 
 function appearanceGender(appearance) {
   const value =
     typeof appearance === 'string' ? appearance : appearance?.id || appearance?.voice || '';
   if (/^(robot|guard|g-01)$/i.test(value)) return 'robot';
-  if (/female|woman|kokoro:[ab]f_/i.test(value)) return 'female';
+  // Earlier Kokoro ids ("kokoro:af_heart") keep their gender.
+  if (/female|woman|supertonic:F|kokoro:[ab]f_/i.test(value)) return 'female';
   return 'male';
 }
 
@@ -54,9 +51,14 @@ export function defaultVoice(actor = 'robot', appearance) {
   return appearanceGender(appearance) === 'female' ? DEFAULT_VOICES.female : DEFAULT_VOICES.male;
 }
 
-/** A valid catalog id: the requested one when known, otherwise the actor's default. */
+/**
+ * A valid catalog id: the requested one when known, otherwise the actor's default (an earlier
+ * Kokoro id falls back to the default of its gender).
+ */
 export function resolveVoice(id, actor = 'robot', appearance) {
-  return voiceInfo(id) ? String(id) : defaultVoice(actor, appearance);
+  if (voiceInfo(id)) return String(id);
+  if (actor !== 'robot' && /^kokoro:/.test(String(id || ''))) return defaultVoice(actor, id);
+  return defaultVoice(actor, appearance);
 }
 
 /**

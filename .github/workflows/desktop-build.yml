@@ -3,6 +3,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  # Speech runs on the CPU: keep onnxruntime-node's CPU library in the Linux package.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 jobs:
   build:
     strategy:
@@ -11,23 +14,39 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --no-audit --no-fund
+      - run: node scripts/setup.mjs
       - run: npm run check
+      - name: Allow Electron's sandbox on Ubuntu runners
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Verify desktop renderer and actor bridges
-        if: runner.os != 'Linux'
-        run: npm run test:desktop
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}npm run test:desktop
+        shell: bash
+      - name: Fetch ONNX Runtime third-party notices
+        shell: bash
+        run: |
+          version=$(node -p "require('onnxruntime-node/package.json').version")
+          mkdir -p .cache/licenses
+          curl -fsSL --retry 3 -o .cache/licenses/ONNXRUNTIME-THIRD-PARTY-NOTICES.txt \
+            "https://raw.githubusercontent.com/microsoft/onnxruntime/v${version}/ThirdPartyNotices.txt"
       - run: npm run dist
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      - uses: actions/upload-artifact@v4
+          GUARD_LAB_REQUIRE_VC_RUNTIME: '1'
+      - name: Check, launch and checksum the package
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}npm run verify:package -- --release --checksums
+        shell: bash
+      - uses: actions/upload-artifact@v7
         with:
           name: guard-lab-${{ runner.os }}
+          if-no-files-found: error
           path: |
             release/*.exe
             release/*.zip
             release/*.AppImage
+            release/*.sha256

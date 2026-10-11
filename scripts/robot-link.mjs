@@ -73,7 +73,8 @@ First packet includes instructions/schemas; later packets list availableTools an
 Run it as a managed process; keep polling that process and keep your harness turn open.
 Do not send a final answer between human moves. exchange sends and waits for a different ID.
 A timeout is idle, not completion. --actor=human selects the independent human channel. Human shortcuts:
-talk MESSAGE, move ZONE, run ZONE, combination CODE, choose_item ITEM; others need no args.
+talk MESSAGE, move ZONE, run ZONE, combination CODE, choose_item ITEM, pick_up OBJECT;
+others need no args.
 Never read private app state while playing. See AGENTS.md and docs/BRIDGE.md.`);
   else if (command === 'session')
     await (await import('./agent-session.mjs')).agentSession(directory, output);
@@ -117,6 +118,7 @@ Never read private app state while playing. See AGENTS.md and docs/BRIDGE.md.`);
       } else if (['move', 'run'].includes(action)) params = { zone: values[1] };
       else if (action === 'combination') params = { code: values[1] };
       else if (action === 'choose_item') params = { item: values[1] };
+      else if (action === 'pick_up') params = { object: values[1] };
       decision = { action, args: params };
     }
     const previous = await waitForTurn(directory, { timeoutMs: 0 });

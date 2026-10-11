@@ -1,14 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { Field } from './kit.jsx';
-
-export const isOllamaEndpoint = (endpoint) => {
-  try {
-    return new URL(endpoint).port === '11434';
-  } catch {
-    return false;
-  }
-};
+import { connectionError, isOllamaEndpoint } from './config.mjs';
 
 export function OllamaPicker({ endpoint, model, onSelect, actor = 'guard' }) {
   const [models, setModels] = useState([]),
@@ -24,7 +17,7 @@ export function OllamaPicker({ endpoint, model, onSelect, actor = 'guard' }) {
       if (!result.models.length) setError('No models installed. Add one in Ollama, then refresh.');
     } catch (err) {
       setModels([]);
-      setError(err.message);
+      setError(connectionError(err, endpoint));
     } finally {
       setLoading(false);
     }

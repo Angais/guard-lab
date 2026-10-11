@@ -42,6 +42,7 @@ const ACTION_ICONS = {
   return: Undo2,
   leave: LogOut,
   run: Footprints,
+  walk: Footprints,
   pass: BadgeCheck,
   hand: Hand,
 };

@@ -55,6 +55,28 @@ export function raisedEquipmentPose(shoulder, aim) {
     direction: new Vector3(0, 1, 0),
   };
 }
+// Close-range warning: the device sits by the hip and points at the floor just in
+// front of the human, so the threat reads without aiming through their body.
+export function lowReadyPose(shoulder, aim, floorY = -0.55) {
+  const toward = new Vector3(aim.x - shoulder.x, 0, aim.z - shoulder.z);
+  if (toward.lengthSq() < 1e-8) toward.set(0, 0, 1);
+  toward.normalize();
+  const grip = shoulder
+    .clone()
+    .add(new Vector3(0, -0.43, 0))
+    .addScaledVector(toward, 0.2);
+  const ground = new Vector3(aim.x, floorY, aim.z).addScaledVector(toward, -0.4);
+  return { grip, direction: ground.sub(grip).normalize() };
+}
+// True when a held device, from grip along direction, stays outside the human capsule.
+export function deviceClearsHuman(grip, direction, length, center, radius = 0.4) {
+  for (let i = 0; i <= 10; i++) {
+    const p = grip.clone().addScaledVector(direction, (length * i) / 10);
+    const y = p.y > 1.42 ? p.y - 1.42 : p.y < 0.35 ? 0.35 - p.y : 0;
+    if ((p.x - center[0]) ** 2 + (p.z - center[1]) ** 2 + y * y < radius * radius) return false;
+  }
+  return true;
+}
 export function closeAttackPose(shoulder, aim) {
   const grip = shoulder.clone().add(new Vector3(-0.04, -0.2, aim.z >= shoulder.z ? -0.65 : 0.65));
   return { grip, direction: aim.clone().sub(grip).normalize() };

@@ -189,6 +189,31 @@ export function createShowcase(config = {}) {
     human('pry_safe', {}, 'Crowbar');
     robot('hold_position', {}, 'Crowbar');
   }
+  reset('Lockpick', 'safe', 1, 'lockpick');
+  for (let i = 0; i < 6 && !state.safe.open; i++) {
+    human('pick_lock', {}, 'Lockpick');
+    robot('hold_position', {}, 'Lockpick');
+  }
+  reset('Flashlight', 'center', 1, 'flashlight');
+  human('wait', {}, 'Flashlight');
+  robot('set_room_lighting', { color: '#fff3df', intensity: 0 }, 'Flashlight');
+  human('toggle_flashlight', {}, 'Flashlight');
+  robot('hold_position', {}, 'Flashlight');
+  human('move', { zone: 'safe' }, 'Flashlight');
+  robot('hold_position', {}, 'Flashlight');
+  human('toggle_flashlight', {}, 'Flashlight');
+  robot('set_room_lighting', { color: '#fff3df', intensity: 1 }, 'Flashlight');
+  reset('Smoke capsule', 'center', 1, 'smoke');
+  human('use_smoke', {}, 'Smoke capsule');
+  robot(
+    'speak',
+    { message: 'Smoke is covering my camera. I can still hear you.' },
+    'Smoke capsule',
+  );
+  for (let i = 0; i < 6 && state.room.smokeTurns > 0; i++) {
+    human('wait', {}, 'Smoke capsule');
+    robot('hold_position', {}, 'Smoke capsule');
+  }
   reset('Security countdown', 'center');
   human('wait', {}, 'Security countdown');
   robot('call_security', {}, 'Security countdown');

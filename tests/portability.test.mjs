@@ -201,3 +201,36 @@ test('schema validation covers required fields, types, bounds and choices', () =
     /Unexpected/,
   );
 });
+
+test('the Node.js minimum covers Electron and Vite and matches setup, doctor and docs', async () => {
+  const minimum = (range, major) =>
+    [...range.matchAll(/(\d+)\.(\d+)\.(\d+)/g)]
+      .map((match) => match.slice(1).map(Number))
+      .filter(([m]) => m === major)
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2])
+      .pop();
+  const read = async (file) => fs.readFile(path.join(ROOT, file), 'utf8');
+  const own = minimum(JSON.parse(await read('package.json')).engines.node, 22);
+  for (const name of ['electron', 'vite']) {
+    const needed = minimum(
+      JSON.parse(await read(`node_modules/${name}/package.json`)).engines.node,
+      22,
+    );
+    if (needed)
+      assert.ok(
+        own[0] === 22 && (own[1] > needed[1] || (own[1] === needed[1] && own[2] >= needed[2])),
+        name,
+      );
+  }
+  const label = `${own[0]}.${own[1]}`;
+  for (const file of [
+    'scripts/setup.mjs',
+    'scripts/doctor.mjs',
+    'README.md',
+    'AGENTS.md',
+    'docs/QUICKSTART.md',
+  ])
+    assert.match(await read(file), new RegExp(`Node(?:\\.js)? ${label.replace('.', '\\.')}`), file);
+  for (const file of ['scripts/setup.mjs', 'scripts/doctor.mjs'])
+    assert.match(await read(file), new RegExp(`minor (?:<|>=) ${own[1]}`), file);
+});

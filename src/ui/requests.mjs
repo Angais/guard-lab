@@ -1,3 +1,16 @@
+// Codex requests waiting for their actor's prepare() to finish, by request id. A cancel in that
+// window ends the wait at once, so the request is never sent for a paused or abandoned game.
+const waitingForReady = new Map();
+const cancelled = () => Object.assign(new Error('Codex request cancelled.'), { code: 'cancelled' });
+function readyUnlessCancelled(id, ready) {
+  return new Promise((resolve, reject) => {
+    waitingForReady.set(id, () => reject(cancelled()));
+    Promise.resolve(ready)
+      .catch(() => {})
+      .then(resolve);
+  }).finally(() => waitingForReady.delete(id));
+}
+
 // Routes one decision to whichever controller drives an actor (Codex, API, terminal agent).
 export async function requestDecision({
   desktop,
@@ -13,8 +26,8 @@ export async function requestDecision({
 }) {
   if (!desktop) throw new Error('Open the desktop app to connect an AI.');
   if (mode === 'codex') {
-    await ready?.catch(() => {});
-    return desktop.codex.request({
+    if (ready) await readyUnlessCancelled(id, ready);
+    const response = await desktop.codex.request({
       id,
       sessionId,
       actor,
@@ -23,6 +36,9 @@ export async function requestDecision({
       allTools,
       settings: codexSettings,
     });
+    // The main process answers a cancelled request with a value rather than a failed handler.
+    if (response?.cancelled) throw cancelled();
+    return response;
   }
   if (mode === 'live') return desktop.requestRobot({ id, ...data, actor });
   return desktop.requestModel({ id, ...data, modelConfig });
@@ -30,6 +46,7 @@ export async function requestDecision({
 
 export function cancelDecision(desktop, mode, id) {
   if (!desktop || !id) return;
+  waitingForReady.get(id)?.();
   const pending = mode === 'codex' ? desktop.codex?.cancel(id) : desktop.cancelModel?.(id);
   pending?.catch?.(() => {});
 }

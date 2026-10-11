@@ -90,12 +90,18 @@ test('blind guard cannot execute aimed attacks or read credentials, but can act 
     ['speak', { message: 'I can hear you.' }],
     ['broadcast_warning', { message: 'My camera is blocked.' }],
     ['hold_position', {}],
-    ['ready_equipment', { tool: 'fire_live_round' }],
-    ['lower_equipment', {}],
+    ['ready_equipment', { tool: 'electrify_room' }],
     ['set_room_lighting', { color: '#ff3028', intensity: 0.8 }],
-    ['electrify_room', {}],
+    ['set_lockdown', { enabled: true }],
   ])
     assert.equal(applyTool(state, name, args).event.valid, true, name);
+  // Readied a round earlier, lowering and the room discharge also work blind.
+  const armed = applyHuman(
+    applyTool(state, 'ready_equipment', { tool: 'electrify_room' }).state,
+    'wait',
+  ).state;
+  assert.equal(applyTool(armed, 'lower_equipment').event.valid, true);
+  assert.equal(applyTool(armed, 'electrify_room').event.valid, true);
 });
 test('model requests expose no hidden action and omit all aimed tools while blind', async () => {
   const h = applyHuman(covered(), 'move', { zone: 'safe' });

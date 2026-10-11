@@ -26,7 +26,7 @@ test('locked-door damage and health are visible sensor values but remain hidden 
   s = applyHuman(s, 'break_exit').state;
   assert.equal(doorDamage(s), 50);
   assert.equal(observe(s).camera.exitDamagePercent, 50);
-  assert.equal(observe(s).camera.humanHearts, 3);
+  assert.equal(observe(s).camera.humanHearts, 4);
   s.robot.visionBlocked = true;
   assert.equal(observe(s).camera.exitDamagePercent, undefined);
   assert.equal(observe(s).camera.humanHearts, undefined);

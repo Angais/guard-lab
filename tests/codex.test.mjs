@@ -346,6 +346,8 @@ test('A valid tool call is submitted, the turn is interrupted and an OpenAI-shap
     assert.equal(threadStarts.length, 1);
     const thread = threadStarts[0].params;
     assert.ok(thread.baseInstructions.startsWith(req.messages[0].content));
+    // Codex marks each turn Guard Lab ends as interrupted; the instructions explain that notice.
+    assert.match(thread.baseInstructions, /Codex marks those turns as interrupted/);
     assert.deepEqual(
       thread.dynamicTools.map((t) => t.name),
       req.allTools.map((t) => t.function.name),
@@ -381,9 +383,20 @@ test('A valid tool call is submitted, the turn is interrupted and an OpenAI-shap
     assert.equal(turn.params.effort, 'low');
     assert.equal(turn.params.serviceTier, 'priority');
     const text = turn.params.input[0].text;
-    assert.ok(text.includes(req.messages.at(-1).content));
     assert.ok(!text.includes('Private memory'), 'the system prompt is not resent per turn');
     assert.match(text, /Available tools now: .*hold_position.*Call exactly one\.$/);
+    // The observation is sent whole, except the rules (verbatim in the system prompt) and the
+    // tool list (named by the closing line).
+    const original = JSON.parse(req.messages.at(-1).content);
+    const sentObservation = JSON.parse(text.slice(0, text.lastIndexOf('\n\nAvailable tools now')));
+    assert.ok(req.messages[0].content.includes(JSON.stringify(original.observation.rules)));
+    assert.equal(sentObservation.observation.rules, undefined);
+    assert.equal(sentObservation.observation.self.availableTools, undefined);
+    for (const name of original.observation.self.availableTools)
+      assert.match(text.split('Available tools now: ')[1], new RegExp(`\\b${name}\\b`));
+    delete original.observation.rules;
+    delete original.observation.self.availableTools;
+    assert.deepEqual(sentObservation, original);
     // A second prepare() for the same, already warm thread changes nothing.
     await h.service.prepare({
       sessionId: 's1',
@@ -440,6 +453,14 @@ test('The turn is interrupted only after Codex records the tool output, without 
     });
     assert.equal(second.message.tool_calls[0].function.name, 'speak');
     await waitFor(async () => (await h.sent('turn/interrupt')).length === 2);
+    // Codex reports a decision's token usage after it was returned; the next decision carries it.
+    assert.equal(first.usage, null);
+    assert.equal(first.timing.previousUsage, undefined);
+    assert.deepEqual(second.timing.previousUsage, {
+      inputTokens: 100,
+      cachedInputTokens: 50,
+      outputTokens: 5,
+    });
   } finally {
     await h.close();
   }
@@ -630,6 +651,12 @@ test('Invalid tools and arguments are rejected with the available list until a v
     // The 4th call is also invalid, but the 3rd invalid attempt already resolved the turn.
     assert.equal(response.message.tool_calls[0].function.name, 'hold_position');
     assert.match(response.message.tool_calls[0].id, /^codex-fallback-/);
+    // The substituted action is marked, so logs and transcripts do not show it as a choice.
+    assert.equal(response.timing.fallback, 'invalid_calls');
+    assert.match(
+      response.timing.fallbackDetail,
+      /3 invalid tool calls .*enabled must be a boolean/,
+    );
     const answers = await toolAnswers(h, 3);
     assert.equal(answers[0].response.result.success, false);
     assert.match(answers[0].response.result.contentItems[0].text, /"fire_laser" is not available/);
@@ -657,6 +684,7 @@ test('Invalid tools and arguments are rejected with the available list until a v
     assert.deepEqual(JSON.parse(response.message.tool_calls[0].function.arguments), {
       enabled: true,
     });
+    assert.equal(response.timing.fallback, undefined);
     const answers = await toolAnswers(retry, 2);
     assert.deepEqual(
       answers.map((a) => a.response.result.success),
@@ -682,6 +710,178 @@ test('A text-only completion returns assistant content for runGuard to speak', a
   } finally {
     await h.close();
   }
+});
+
+test('A turn that ends with neither a tool call nor text resolves to a marked fallback', async () => {
+  const h = await harness(turns([{ complete: 'completed' }]));
+  try {
+    const req = guardRequest();
+    const response = await h.service.request({
+      id: 'n',
+      sessionId: 's',
+      ...req,
+      settings: h.settings,
+    });
+    assert.equal(response.message.tool_calls[0].function.name, 'hold_position');
+    assert.equal(response.timing.fallback, 'no_action');
+  } finally {
+    await h.close();
+  }
+});
+
+test('A cancel that arrives before its request, while prepare() runs, stops that request', async () => {
+  const h = await harness({ threadStartDelayMs: 300 });
+  try {
+    const req = guardRequest();
+    const preparing = h.service.prepare({
+      sessionId: 's',
+      system: req.messages[0].content,
+      allTools: req.allTools,
+      settings: h.settings,
+    });
+    // The renderer waits for prepare() before sending the request; the player pauses meanwhile.
+    assert.deepEqual(await h.service.cancel('early'), { cancelled: false });
+    assert.deepEqual(await preparing, { ok: true });
+    await assert.rejects(
+      h.service.request({ id: 'early', sessionId: 's', ...req, settings: h.settings }),
+      (error) => error.code === 'cancelled',
+    );
+    // Only the warm-up ran: the cancelled decision never reached Codex.
+    assert.equal((await h.sent('turn/start')).length, 1);
+    const next = await h.service.request({
+      id: 'later',
+      sessionId: 's',
+      ...req,
+      settings: h.settings,
+    });
+    assert.equal(next.message.tool_calls[0].function.name, 'hold_position');
+    assert.equal((await h.sent('thread/start')).length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test('A reset while prepare() starts the thread drops that thread instead of leaking it', async () => {
+  const h = await harness({ threadStartDelayMs: 300 });
+  try {
+    const req = guardRequest();
+    const preparing = h.service.prepare({
+      sessionId: 'gone',
+      system: req.messages[0].content,
+      allTools: req.allTools,
+      settings: h.settings,
+    });
+    await waitFor(async () => (await h.sent('thread/start')).length === 1);
+    await h.service.reset('gone');
+    // A reset is how a player leaves, so prepare() reports it instead of failing.
+    assert.deepEqual(await preparing, { ok: false, cancelled: true });
+    assert.deepEqual(h.service._debug().threads, []);
+    await waitFor(async () => (await h.sent('thread/unsubscribe')).length === 1);
+    assert.equal((await h.sent('turn/start')).length, 0, 'no warm-up for a dropped thread');
+    // The service stays usable for the same id afterwards.
+    await h.service.request({ id: 'again', sessionId: 'gone', ...req, settings: h.settings });
+    assert.equal(h.service._debug().threads.length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test('A reset right after a decision stops the settling Codex turn before unsubscribing', async () => {
+  const h = await harness(turns([{ ...call('hold_position'), noUsage: true }]), {
+    settleCapMs: 4000,
+  });
+  try {
+    const req = guardRequest();
+    await h.service.request({ id: 'd', sessionId: 's', ...req, settings: h.settings });
+    assert.equal((await h.sent('turn/interrupt')).length, 0, 'still settling');
+    const started = Date.now();
+    await h.service.reset('s');
+    await waitFor(async () => (await h.sent('thread/unsubscribe')).length === 1);
+    const order = (await h.entries())
+      .filter(
+        (e) => e.type === 'client' && /turn\/interrupt|thread\/unsubscribe/.test(e.message.method),
+      )
+      .map((e) => e.message.method);
+    assert.deepEqual(order, ['turn/interrupt', 'thread/unsubscribe']);
+    assert.ok(Date.now() - started < 1500, 'not left to the settle cap');
+  } finally {
+    await h.close();
+  }
+});
+
+test('The desktop IPC answers a cancelled request as a value, not a failed handler', async () => {
+  const dir = await temporaryDirectory('guard-codex-ipc-');
+  const scenario = path.join(dir, 'scenario.json');
+  await fs.writeFile(scenario, JSON.stringify(turns([{ hang: true }])));
+  const handlers = new Map();
+  const ipcMain = { handle: (channel, handler) => handlers.set(channel, handler) };
+  const env = { PATH: dir, FAKE_CODEX_SCENARIO: scenario };
+  for (const key of PASS_THROUGH) if (process.env[key]) env[key] = process.env[key];
+  const registered = codex.registerCodex({
+    ipcMain,
+    shell: { openExternal: async () => {} },
+    serviceOptions: {
+      env,
+      home: dir,
+      workspace: path.join(dir, 'workspace'),
+      systemSearch: false,
+      loginShell: false,
+    },
+  });
+  try {
+    const req = guardRequest();
+    const settings = { model: 'gpt-6-luna', effort: 'low', fast: true, codexPath: FAKE };
+    const pending = handlers.get('codex:request')(null, {
+      id: 'ipc',
+      sessionId: 's',
+      ...req,
+      settings,
+    });
+    await waitFor(async () => registered.service._debug().threads.length === 1);
+    await delay(100);
+    assert.deepEqual(await handlers.get('codex:cancel')(null, 'ipc'), { cancelled: true });
+    assert.deepEqual(await pending, { cancelled: true });
+    // Real failures still reject.
+    await assert.rejects(handlers.get('codex:request')(null, { id: 'bad' }), /needs messages/);
+  } finally {
+    registered.close();
+    await delay(80);
+    await removeTemporary(dir);
+  }
+});
+
+test('The renderer drops a decision cancelled while it waits for prepare()', async () => {
+  const { requestDecision, cancelDecision } = await import('../src/ui/requests.mjs');
+  const sent = [];
+  let finishPrepare;
+  const ready = new Promise((resolve) => (finishPrepare = resolve));
+  const desktop = {
+    codex: {
+      request: async (data) => {
+        sent.push(['request', data.id]);
+        return data.id === 'main-cancelled' ? { cancelled: true } : { message: { content: 'ok' } };
+      },
+      cancel: async (id) => sent.push(['cancel', id]),
+    },
+  };
+  const base = { desktop, mode: 'codex', data: { messages: [], tools: [] }, sessionId: 's' };
+  const pending = requestDecision({ ...base, id: 'paused', ready });
+  cancelDecision(desktop, 'codex', 'paused');
+  // It settles at once (Pause no longer looks frozen) and is never sent.
+  await assert.rejects(
+    Promise.race([pending, delay(500).then(() => 'still waiting for prepare')]),
+    (error) => error.code === 'cancelled',
+  );
+  finishPrepare();
+  await delay(10);
+  assert.deepEqual(sent, [['cancel', 'paused']]);
+  await assert.rejects(
+    requestDecision({ ...base, id: 'main-cancelled', ready }),
+    (error) => error.code === 'cancelled',
+  );
+  assert.deepEqual(await requestDecision({ ...base, id: 'fine', ready }), {
+    message: { content: 'ok' },
+  });
 });
 
 test('Cancel interrupts a pending turn; reset drops the thread; timeouts and failures are clear', async () => {

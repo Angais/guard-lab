@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, Menu } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const { version } = require('../package.json');
 const { dataDirectory, bridgeDirectory } = require('../shared/runtime.cjs');
 const bridge = import('../shared/bridge.mjs');
 const { registerCodex } = require('./codex.cjs');
@@ -20,6 +21,44 @@ app.on('second-instance', () => {
     window.focus();
   }
 });
+// `npm start` serves the renderer from a loopback Vite server. Packaged builds always load the
+// bundled app, so a launch argument cannot point the desktop bridge at another page.
+function devServerUrl() {
+  const arg = process.argv.indexOf('--dev-url');
+  if (arg === -1 || app.isPackaged) return null;
+  try {
+    const url = new URL(process.argv[arg + 1]);
+    return url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+// Players get no Reload or Developer Tools: a reload silently ends the encounter and DevTools
+// exposes hidden state. Development against the Vite server keeps Electron's default menu.
+function setGameMenu() {
+  const mac = process.platform === 'darwin';
+  app.setAboutPanelOptions({ applicationName: 'Guard Lab', applicationVersion: version });
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: mac ? 'appMenu' : 'fileMenu' },
+      { role: 'editMenu' },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'resetZoom' },
+          { role: 'zoomIn' },
+          { role: 'zoomOut' },
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
+      },
+      { role: 'windowMenu' },
+      ...(mac ? [] : [{ role: 'help', submenu: [{ role: 'about', label: 'About Guard Lab' }] }]),
+    ]),
+  );
+}
 function createWindow() {
   window = new BrowserWindow({
     show: !process.argv.includes('--test-desktop'),
@@ -38,13 +77,14 @@ function createWindow() {
       sandbox: true,
       backgroundThrottling: !liveRobot,
       autoplayPolicy: 'no-user-gesture-required',
+      additionalArguments: [`--guard-lab-version=${version}`],
     },
   });
   window.webContents.on('console-message', (event) => {
     if (event.level === 'error') console.error('[renderer]', event.message);
   });
-  const arg = process.argv.indexOf('--dev-url');
-  if (arg !== -1) window.loadURL(process.argv[arg + 1]);
+  const url = devServerUrl();
+  if (url) window.loadURL(url);
   else window.loadFile(path.join(__dirname, '../dist/index.html'));
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (e) => e.preventDefault());
@@ -181,6 +221,7 @@ app.whenReady().then(async () => {
     ['robot', 'human'].map((actor) => protocol.resetChannel(bridgeDirectory(actor))),
   );
   voice.ready?.();
+  if (!devServerUrl()) setGameMenu();
   createWindow();
 });
 app.on('window-all-closed', () => {

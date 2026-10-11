@@ -8,14 +8,14 @@ import {
   Send,
   X,
 } from 'lucide-react';
-import { humanDock, ZONE_INFO } from './play.mjs';
+import { humanDock, isWet, ZONE_INFO } from './play.mjs';
 import { actionIcon, ITEM_ICONS } from './icons.jsx';
 import { Button, Popover } from './kit.jsx';
 import { MiniMap } from './MiniMap.jsx';
 import { isTyping } from './hooks.mjs';
 import { submitSpeechOnEnter } from './keyboard.mjs';
 
-function DockButton({ item, disabled, onAct, onKeypad }) {
+function DockButton({ item, disabled, onAct, onKeypad, open }) {
   const Icon = actionIcon(item.icon);
   return (
     <Button
@@ -23,6 +23,8 @@ function DockButton({ item, disabled, onAct, onKeypad }) {
       icon={Icon}
       disabled={disabled || item.disabled}
       title={item.title}
+      className={open ? 'is-open' : ''}
+      aria-expanded={item.keypad ? Boolean(open) : undefined}
       onClick={() => (item.keypad ? onKeypad() : onAct(item.action, item.args))}
     >
       {item.label}
@@ -186,7 +188,7 @@ export function ActionDock({
             onMove={move}
             run={run}
             onRun={setRun}
-            hasItem={state.human.hasItem}
+            wet={ZONE_INFO.map((z) => z.id).filter((zone) => isWet(state, zone))}
           />
         </Popover>
       )}
@@ -211,7 +213,7 @@ export function ActionDock({
       )}
       <div className={`dock ${off ? 'is-waiting' : ''}`} role="toolbar" aria-label="Your actions">
         {dock.stunned > 0 && (
-          <span className="chip chip-danger">Stunned · talk only · {dock.stunned}</span>
+          <span className="chip chip-danger">Stunned · talk or wait · {dock.stunned}</span>
         )}
         {dock.context.map((item) => (
           <DockButton
@@ -220,6 +222,7 @@ export function ActionDock({
             disabled={off}
             onAct={act}
             onKeypad={() => toggle('keypad')}
+            open={item.keypad && panel === 'keypad'}
           />
         ))}
         {dock.item &&

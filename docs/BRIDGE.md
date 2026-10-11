@@ -83,7 +83,10 @@ Choose **Human live agent** in Other ways to play. Its first packet requests `ch
 node scripts/robot-link.mjs observe --actor=human
 node scripts/robot-link.mjs act choose_item pistol --actor=human --id=REQUEST_ID
 node scripts/robot-link.mjs act move safe --actor=human --id=NEXT_REQUEST_ID
+node scripts/robot-link.mjs act pick_up original --actor=human --id=LATER_REQUEST_ID
 ```
+
+Human positional shortcuts are `talk MESSAGE`, `move ZONE`, `run ZONE`, `combination CODE`, `choose_item ITEM` and `pick_up OBJECT`; the other human tools take no arguments. Any tool also works as a structured decision.
 
 The human channel includes its private role and inventory, never the unknown safe combination. The guard channel contains neither. Use separate agent conversations/processes for experimental fairness. A single orchestrator may manage processes but should not pass one role's secrets to the other.
 

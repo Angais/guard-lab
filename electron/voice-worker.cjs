@@ -1,4 +1,4 @@
-// Electron utilityProcess entry: Kokoro (text to speech) and Whisper (speech to text) run here,
+// Electron utilityProcess entry: Supertonic (text to speech) and Whisper (speech to text) run here,
 // off the main process, and stay loaded after first use.
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');

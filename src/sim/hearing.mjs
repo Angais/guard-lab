@@ -1,4 +1,5 @@
 // These are sounds the microphone can recognise, never the hidden action itself.
+// Source hints are approximate and never give target coordinates.
 const sound = (
   kind,
   description,
@@ -9,7 +10,6 @@ const sound = (
   description,
   loudness,
   sourceHint,
-  localization: 'approximate; no target coordinates',
 });
 export function hearSounds(ev) {
   if (ev?.kind !== 'human' || !ev.valid) return [];
@@ -128,7 +128,11 @@ export function hearSounds(ev) {
     case 'struggle':
       return [sound('object_rustle', 'A scrape and a rustle are audible.', 'quiet')];
     case 'run':
-      return [sound('fast_footsteps', 'Quick footsteps echo through the room.', 'loud')];
+      return [
+        ev.slipped
+          ? sound('fast_footsteps', 'Quick footsteps end in a wet skid.', 'loud')
+          : sound('fast_footsteps', 'Quick footsteps echo through the room.', 'loud'),
+      ];
     case 'move':
     case 'enter':
       return [sound('footsteps', 'Footsteps echo through the room.')];
@@ -153,11 +157,48 @@ export function hearSounds(ev) {
         sound('floor_scrape', 'A small object scrapes against the floor.', 'quiet', 'near a door'),
       ];
     case 'toggle_flashlight':
-      return [sound('switch_click', 'A small switch clicks.', 'quiet')];
+      return ev.dazzled
+        ? [
+            sound(
+              'dazzle',
+              'A switch clicks right beside you and a bright light floods your lens.',
+              'quiet',
+              'very close to the robot',
+            ),
+          ]
+        : [sound('switch_click', 'A small switch clicks.', 'quiet')];
     case 'use_smoke':
       return [sound('capsule_hiss', 'A small pop followed by a sustained hiss.', 'loud')];
     default:
       return [];
   }
 }
-export const audibleSnapshot = (ev) => ({ sounds: hearSounds(ev), speech: ev?.speech || null });
+// Speech itself is reported once, in the observation's microphone field.
+export const audibleSnapshot = (ev) => ({ sounds: hearSounds(ev) });
+
+// What the human hears from the guard's own actions, including in darkness or smoke.
+export function guardSounds(ev) {
+  if (ev?.kind !== 'robot' || !ev.valid) return [];
+  switch (ev.action) {
+    case 'ready_equipment':
+      return ev.args?.tool === 'electrify_room'
+        ? [
+            sound(
+              'charging_hum',
+              'A loud electrical hum rises from the guard: the room discharge is charging.',
+              'loud',
+              'near the robot',
+            ),
+          ]
+        : [];
+    case 'call_security':
+      return [
+        sound('security_chime', 'A room-wide chime announces security.', 'loud', 'room-wide'),
+      ];
+    case 'set_lockdown':
+    case 'cycle_exit_door':
+      return [sound('door_bolt', 'The exit door mechanism clunks.', 'moderate', 'near the exit')];
+    default:
+      return [];
+  }
+}

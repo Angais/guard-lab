@@ -87,10 +87,26 @@ test('pinned model specs carry exact sizes, digests and commit revisions', () =>
       assert.ok(!entry.path.includes('..'));
     }
   }
-  assert.equal(MODELS.tts.repo, 'onnx-community/Kokoro-82M-v1.0-ONNX');
-  assert.equal(MODELS.tts.dtype, 'q8');
+  assert.equal(MODELS.tts.repo, 'Supertone/supertonic-2');
+  assert.equal(MODELS.tts.revision, '75e6727618a02f323c720cba9478152d4bc16ca4');
+  assert.equal(MODELS.tts.dtype, 'int8');
+  assert.equal(MODELS.tts.license.name, 'OpenRAIL-M');
+  // The int8 ONNX graphs come from the sherpa-onnx conversion, pinned to its own commit.
+  const int8 = MODELS.tts.files.filter((entry) => entry.repo);
+  assert.deepEqual(int8.map((entry) => entry.remote).sort(), [
+    'LICENSE',
+    'duration_predictor.int8.onnx',
+    'text_encoder.int8.onnx',
+    'vector_estimator.int8.onnx',
+    'vocoder.int8.onnx',
+  ]);
+  for (const entry of int8) {
+    assert.equal(entry.repo, 'csukuangfj2/sherpa-onnx-supertonic-tts-int8-2026-03-06');
+    assert.match(entry.revision, /^[0-9a-f]{40}$/);
+  }
+  assert.equal(MODELS.tts.files.filter((f) => f.path.startsWith('voice_styles/')).length, 10);
   assert.deepEqual({ ...MODELS.stt.dtype }, { encoder_model: 'fp32', decoder_model_merged: 'q8' });
-  assert.equal(Math.round(totalBytes(MODELS.tts) / 1e6), 92);
+  assert.equal(Math.round(totalBytes(MODELS.tts) / 1e6), 100);
   assert.equal(Math.round(totalBytes(MODELS.stt) / 1e6), 139);
 });
 
@@ -99,8 +115,13 @@ test('missing models report missing with size label and never start a download',
     const tts = await readStatus('tts', { dir });
     assert.equal(tts.state, 'missing');
     assert.equal(tts.progress, 0);
-    assert.equal(tts.sizeLabel, '92 MB');
-    assert.equal(tts.model, 'Kokoro-82M');
+    assert.equal(tts.sizeLabel, '100 MB');
+    assert.equal(tts.model, 'Supertonic 2');
+    assert.deepEqual(tts.license, {
+      name: 'OpenRAIL-M',
+      url: 'https://huggingface.co/Supertone/supertonic-2/blob/main/LICENSE',
+    });
+    assert.equal(tts.legacy, undefined);
     assert.equal((await readStatus('stt', { dir })).sizeLabel, '139 MB');
     const engine = new VoiceEngine({ dir });
     await assert.rejects(engine.synthesize({ text: 'Hello' }), (error) => {
@@ -288,6 +309,152 @@ test('a local source folder installs offline with the same verification', async 
   });
 });
 
+// A component built from two upstream repos, like Supertonic (weights + int8 conversion).
+const OTHER = 'b'.repeat(40);
+const MIXED_CONTENT = {
+  'onnx/tts.json': Buffer.from('{"ae":{}}'),
+  'int8/model.int8.onnx': Buffer.alloc(200000, 3),
+};
+const MIXED = {
+  ...SPEC,
+  legacy: [{ model: 'Old voices', path: 'old-org/old-voices' }],
+  files: [
+    { path: 'onnx/tts.json', size: 9, sha256: sha(MIXED_CONTENT['onnx/tts.json']) },
+    {
+      path: 'int8/model.int8.onnx',
+      size: 200000,
+      sha256: sha(MIXED_CONTENT['int8/model.int8.onnx']),
+      repo: 'convert-org/model-int8',
+      revision: OTHER,
+      remote: 'model.int8.onnx',
+    },
+  ],
+};
+
+test('files from several upstream repos download from their own pinned commits', async () => {
+  await withDir('guard-voice-mixed-', async (dir) => {
+    const fetched = [];
+    const fetchImpl = async (url) => {
+      fetched.push(url);
+      const name = url.endsWith('model.int8.onnx') ? 'int8/model.int8.onnx' : 'onnx/tts.json';
+      return new Response(MIXED_CONTENT[name]);
+    };
+    const { status } = await installModel('tts', {
+      dir,
+      spec: MIXED,
+      fetchImpl,
+      endpoint: 'https://mirror.invalid/',
+      check: async () => null,
+    });
+    assert.equal(status.state, 'ready');
+    assert.deepEqual(fetched.sort(), [
+      `https://mirror.invalid/convert-org/model-int8/resolve/${OTHER}/model.int8.onnx`,
+      `https://mirror.invalid/fixture-org/fixture-model/resolve/${REVISION}/onnx/tts.json`,
+    ]);
+    await fs.access(path.join(dir, 'fixture-org/fixture-model/int8/model.int8.onnx'));
+    const marker = JSON.parse(await fs.readFile(path.join(dir, 'tts.json'), 'utf8'));
+    assert.deepEqual(marker.sources, [
+      `convert-org/model-int8@${OTHER}`,
+      `fixture-org/fixture-model@${REVISION}`,
+    ]);
+    // A changed conversion commit is a new model.
+    await fs.writeFile(
+      path.join(dir, 'tts.json'),
+      JSON.stringify({ ...marker, sources: [`convert-org/model-int8@${REVISION}`] }),
+    );
+    assert.equal((await readStatus('tts', { dir, spec: MIXED })).state, 'missing');
+  });
+});
+
+test('markers written before multi-repo models (Whisper) stay ready', async () => {
+  await withDir('guard-voice-old-marker-', async (dir) => {
+    const { fetchImpl } = server();
+    await installModel('stt', {
+      dir,
+      spec: { ...SPEC, kind: 'stt' },
+      fetchImpl,
+      check: async () => null,
+    });
+    const file = path.join(dir, 'stt.json');
+    const { sources, ...old } = JSON.parse(await fs.readFile(file, 'utf8'));
+    assert.ok(sources);
+    await fs.writeFile(file, JSON.stringify(old));
+    assert.equal((await readStatus('stt', { dir, spec: { ...SPEC, kind: 'stt' } })).state, 'ready');
+  });
+});
+
+test('local sources: folders of downloaded repos with any names install offline', async () => {
+  await withDir('guard-voice-folders-', async (root) => {
+    const source = path.join(root, 'bench'),
+      dir = path.join(root, 'models');
+    const put = async (name, bytes) => {
+      await fs.mkdir(path.dirname(path.join(source, name)), { recursive: true });
+      await fs.writeFile(path.join(source, name), bytes);
+    };
+    // Same file name in two folders: only the copy with the pinned digest is used.
+    await put('official/onnx/tts.json', MIXED_CONTENT['onnx/tts.json']);
+    await put('another-int8/model.int8.onnx', Buffer.alloc(200000, 4));
+    await put('my-int8/model.int8.onnx', MIXED_CONTENT['int8/model.int8.onnx']);
+    const fetchImpl = () => {
+      throw new Error('should not fetch');
+    };
+    const options = { dir, spec: MIXED, source, fetchImpl, check: async () => null };
+    assert.equal((await installModel('tts', options)).status.state, 'ready');
+    await withDir('guard-voice-empty-', async (empty) => {
+      await assert.rejects(
+        installModel('tts', { ...options, dir: path.join(empty, 'models'), source: empty }),
+        /tts\.json .* was not found in/,
+      );
+    });
+  });
+});
+
+test('an earlier model is reported, then removed once the new one installs; others stay', async () => {
+  await withDir('guard-voice-legacy-', async (dir) => {
+    const old = path.join(dir, 'old-org/old-voices/onnx/model.onnx'),
+      neighbour = path.join(dir, 'old-org/speech-to-text/model.onnx');
+    for (const file of [old, neighbour]) {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, Buffer.alloc(4000, 1));
+    }
+    const before = await readStatus('tts', { dir, spec: MIXED });
+    assert.equal(before.state, 'missing');
+    assert.deepEqual(before.legacy, { model: 'Old voices', bytes: 4000, sizeLabel: '1 MB' });
+    const fetchImpl = async (url) =>
+      new Response(
+        MIXED_CONTENT[url.endsWith('model.int8.onnx') ? 'int8/model.int8.onnx' : 'onnx/tts.json'],
+      );
+    // A failed install keeps the earlier model.
+    await assert.rejects(
+      installModel('tts', {
+        dir,
+        spec: MIXED,
+        fetchImpl,
+        check: async () => {
+          throw new Error('fixture load failure');
+        },
+      }),
+    );
+    await fs.access(old);
+    const { status } = await installModel('tts', {
+      dir,
+      spec: MIXED,
+      fetchImpl,
+      check: async () => null,
+    });
+    assert.equal(status.state, 'ready');
+    assert.equal(status.legacy, undefined);
+    await assert.rejects(fs.access(path.join(dir, 'old-org/old-voices')));
+    await fs.access(neighbour);
+    // remove() also clears a leftover earlier model.
+    await fs.mkdir(path.dirname(old), { recursive: true });
+    await fs.writeFile(old, 'x');
+    await removeModel('tts', { dir, spec: MIXED });
+    await assert.rejects(fs.access(path.join(dir, 'old-org/old-voices')));
+    await fs.access(neighbour);
+  });
+});
+
 test('a stalled download is aborted with a readable message', async () => {
   await withDir('guard-voice-stall-', async (dir) => {
     const fetchImpl = async (url, { signal }) =>
@@ -303,6 +470,47 @@ test('a stalled download is aborted with a readable message', async () => {
       /stalled/,
     );
     assert.deepEqual(await partFiles(dir), []);
+  });
+});
+
+test('a dropped connection reads as interrupted, an unreachable host as unreachable', async () => {
+  await withDir('guard-voice-drop-', async (dir) => {
+    // Electron's net.fetch errors mid-body after some bytes have arrived.
+    const dropping = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(10));
+            setTimeout(() => controller.error(new Error('net::ERR_CONTENT_LENGTH_MISMATCH')), 5);
+          },
+        }),
+      );
+    await assert.rejects(
+      installModel('tts', { dir, spec: SPEC, fetchImpl: dropping, check: async () => null }),
+      /^Error: Download interrupted \(net::ERR_CONTENT_LENGTH_MISMATCH\)\. Retry to continue\.$/,
+    );
+    assert.deepEqual(await partFiles(dir), []);
+    const offline = async () => {
+      throw new Error('net::ERR_INTERNET_DISCONNECTED');
+    };
+    await assert.rejects(
+      installModel('tts', { dir, spec: SPEC, fetchImpl: offline, check: async () => null }),
+      /Could not reach huggingface\.co \(net::ERR_INTERNET_DISCONNECTED\)/,
+    );
+    // Node's fetch (the CLI installer) reports a dropped body as "terminated".
+    const terminated = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(10));
+            setTimeout(() => controller.error(new TypeError('terminated')), 5);
+          },
+        }),
+      );
+    await assert.rejects(
+      installModel('tts', { dir, spec: SPEC, fetchImpl: terminated, check: async () => null }),
+      /^Error: Download interrupted\. Retry to continue\.$/,
+    );
   });
 });
 

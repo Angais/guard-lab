@@ -1,8 +1,11 @@
 // Push-to-talk capture: opens the microphone only while recording, returns mono 16 kHz PCM
-// for local Whisper transcription (desktop.voice.transcribe). Nothing is stored.
+// for local Whisper transcription (desktop.voice.transcribe). Nothing is stored. Recordings
+// stop growing at `maxSeconds`; the `full` flag lets the caller send what it has.
 import { resample, STT_SAMPLE_RATE } from '../../shared/voice-audio.mjs';
 
 const BUFFER_SIZE = 2048;
+/** Longest recording kept; the caller sends the clip when `full` turns true. */
+export const MAX_RECORDING_SECONDS = 30;
 
 export function microphoneHelp(platform) {
   if (platform === 'darwin')
@@ -41,7 +44,7 @@ export function createRecorder({
   desktop = globalThis.window?.desktop,
   mediaDevices = globalThis.navigator?.mediaDevices,
   AudioContextClass,
-  maxSeconds = 30,
+  maxSeconds = MAX_RECORDING_SECONDS,
 } = {}) {
   const platform = desktop?.platform || '';
   let session = null,
@@ -96,7 +99,7 @@ export function createRecorder({
           const copy = data.slice(0, Math.min(data.length, limit - current.length));
           current.chunks.push(copy);
           current.length += copy.length;
-        }
+        } else current.full = true;
         current.tick?.();
       };
       current.source.connect(current.processor);
@@ -114,6 +117,9 @@ export function createRecorder({
   async function stop() {
     const current = session;
     if (!current) return { pcm: new Float32Array(0), sampleRate: STT_SAMPLE_RATE, durationMs: 0 };
+    // Detach first: a start() while the tail is collected opens a fresh capture.
+    session = null;
+    smoothed = 0;
     await current.ready;
     if (current.processor && !current.cancelled)
       // Collect the audio still inside the processor buffer so the last word is kept.
@@ -124,9 +130,7 @@ export function createRecorder({
           resolve();
         };
       });
-    if (session === current) session = null;
     teardown(current);
-    smoothed = 0;
     const merged = new Float32Array(current.length);
     let offset = 0;
     for (const chunk of current.chunks) {
@@ -171,6 +175,10 @@ export function createRecorder({
     level,
     get active() {
       return Boolean(session);
+    },
+    /** True once the recording has reached `maxSeconds`; later audio is not kept. */
+    get full() {
+      return Boolean(session?.full);
     },
   };
 }

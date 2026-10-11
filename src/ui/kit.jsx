@@ -125,13 +125,21 @@ export function Hearts({ value, max = RULES.humanHearts, known = true, label }) 
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d={HEART} />
           </svg>
-          <i style={{ width: `${Math.max(0, Math.min(1, amount - i)) * 100}%` }}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d={HEART} />
-            </svg>
-          </i>
+          {/* Unknown health is dashed outlines, never the empty hearts of a destroyed guard. */}
+          {known && (
+            <i style={{ width: `${Math.max(0, Math.min(1, amount - i)) * 100}%` }}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d={HEART} />
+              </svg>
+            </i>
+          )}
         </span>
       ))}
+      {!known && (
+        <span className="hearts-unknown" aria-hidden="true">
+          ?
+        </span>
+      )}
     </span>
   );
 }

@@ -68,8 +68,13 @@ export function Vitals({ state, humanKnown = true, robotKnown = true, humanName 
 
 export function HudMenu({ items }) {
   const [open, setOpen] = useState(false);
+  // An item with `confirm` asks for a second click (leaving a game in progress).
+  const [armed, setArmed] = useState(null);
   const root = useRef(null);
   useDismiss(open, () => setOpen(false));
+  useEffect(() => {
+    if (!open) setArmed(null);
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const close = (event) => {
@@ -98,14 +103,18 @@ export function HudMenu({ items }) {
                 role="menuitem"
                 key={item.label}
                 disabled={item.disabled}
-                className={item.tone === 'danger' ? 'is-danger' : ''}
+                className={item.tone === 'danger' || armed === item.label ? 'is-danger' : ''}
                 onClick={() => {
+                  if (item.confirm && armed !== item.label) {
+                    setArmed(item.label);
+                    return;
+                  }
                   setOpen(false);
                   item.onSelect();
                 }}
               >
                 {item.icon && <item.icon size={16} strokeWidth={1.75} aria-hidden="true" />}
-                {item.label}
+                {armed === item.label ? item.confirm : item.label}
                 {item.hint && <kbd className="kbd">{item.hint}</kbd>}
               </button>
             ),

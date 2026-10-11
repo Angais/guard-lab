@@ -1,10 +1,14 @@
 name: Source checks
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  # Speech runs on the CPU: skip onnxruntime-node's optional CUDA download on Linux x64.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 jobs:
   check:
     strategy:
@@ -13,15 +17,25 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --no-audit --no-fund
+      # The documented install path, then its diagnostics.
+      - run: node scripts/setup.mjs
+      - name: Allow Electron's sandbox on Ubuntu runners
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}npm run doctor
+        shell: bash
       - run: npm run check
+      - name: Desktop smoke test (Electron renderer, WebGL, menu, bridges)
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}npm run test:desktop
+        shell: bash
       - run: npm run package:source
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: source-${{ runner.os }}
           path: release-source/*
+          if-no-files-found: error

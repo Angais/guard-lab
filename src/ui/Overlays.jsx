@@ -1,8 +1,33 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { CircleAlert, Download, Mic, Play, Plus, RotateCcw, ScrollText, X } from 'lucide-react';
 import { Button, Spinner } from './kit.jsx';
+import { displaySpeech, subtitlePages } from './play.mjs';
 
-export function Subtitles({ line, callout }) {
+// Per-word pace for paging long lines: spoken lines follow the voice, silent ones reading speed.
+const PACE = { voiced: 360, read: 240 };
+
+export function Subtitles({ line, callout, voiced = false }) {
+  const text = line ? displaySpeech(line.text) : '';
+  const pages = useMemo(() => subtitlePages(text), [text]);
+  const [page, setPage] = useState(0);
+  // A long line pages through, three lines at a time, so its ending is never cut off.
+  useEffect(() => {
+    setPage(0);
+    if (pages.length < 2) return;
+    let index = 0,
+      timer;
+    const next = () => {
+      const words = pages[index].split(/\s+/).length;
+      const wait = Math.max(1800, words * (voiced ? PACE.voiced : PACE.read) + (index ? 0 : 600));
+      timer = setTimeout(() => {
+        if (index >= pages.length - 1) return;
+        setPage(++index);
+        next();
+      }, wait);
+    };
+    next();
+    return () => clearTimeout(timer);
+  }, [line?.id, pages]);
   return (
     <div className="subtitles" aria-live="polite">
       {callout && (
@@ -15,10 +40,17 @@ export function Subtitles({ line, callout }) {
           key={line.id}
           className={`subtitle subtitle-${line.who} ${line.pending ? 'is-pending' : ''}`}
         >
-          <span className="subtitle-speaker">
-            {line.who === 'robot' ? 'G-01' : line.name || 'You'}
+          <span className="subtitle-body">
+            <span className="subtitle-speaker">
+              {line.who === 'robot' ? 'G-01' : line.name || 'You'}
+            </span>
+            <span className="subtitle-text">{pages[page] ?? text}</span>
           </span>
-          <span className="subtitle-text">{line.text}</span>
+          {pages.length > 1 && (
+            <span className="subtitle-page" aria-hidden="true">
+              {page + 1}/{pages.length}
+            </span>
+          )}
         </p>
       )}
     </div>
@@ -67,7 +99,12 @@ export function TalkPill({ phase, level, keyName }) {
   if (phase === 'idle') return null;
   return (
     <div className={`talk-pill talk-${phase}`} role="status" aria-live="assertive">
-      {phase === 'listening' ? (
+      {phase === 'starting' ? (
+        <>
+          <Mic size={18} strokeWidth={2} aria-hidden="true" />
+          <span>Opening mic…</span>
+        </>
+      ) : phase === 'listening' ? (
         <>
           <Mic size={18} strokeWidth={2} aria-hidden="true" />
           <span>Listening…</span>
@@ -97,6 +134,7 @@ export function EndScreen({ summary, onPlayAgain, onNewGame, onReplay, onLog, on
       <div className="end-card">
         <h1>{summary.title}</h1>
         <p>{summary.line}</p>
+        {summary.detail && <p className="end-detail">{summary.detail}</p>}
         <div className="end-actions">
           {onPlayAgain && (
             <Button variant="primary" size="lg" icon={RotateCcw} onClick={onPlayAgain} autoFocus>

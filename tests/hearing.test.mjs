@@ -14,7 +14,7 @@ import { sensorPacket } from '../scripts/bridge.mjs';
 const covered = () =>
   applyHuman(
     applyHuman(
-      applyHuman(initialState('thief-uniform', undefined, '9873', 8192), 'enter').state,
+      applyHuman(initialState('thief-uniform', undefined, '9873', 1), 'enter').state,
       'move',
       { zone: 'robot' },
     ).state,
@@ -93,21 +93,23 @@ test('hearing alone cannot grant aimed attacks or consume their ammunition', () 
     assert.deepEqual(fired.state.robot.ammo, h.state.robot.ammo);
   }
 });
-test('camera removal waits the initial response then requires two consecutive rounds', () => {
+test('camera removal waits the initial response then requires three consecutive rounds', () => {
   let s = covered();
   assert.equal(applyTool(s, 'remove_camera_cover').event.valid, false);
   s = applyTool(s, 'hold_position').state;
+  for (let i = 1; i <= 2; i++) {
+    s = applyHuman(s, 'wait').state;
+    const step = applyTool(s, 'remove_camera_cover');
+    assert.equal(step.event.valid, true);
+    s = step.state;
+    assert.equal(s.robot.visionBlocked, true);
+    assert.equal(s.robot.coverRemovalProgress, i);
+    assert.equal(s.room.sackOnFloor, false);
+    assert.equal(applyTool(s, 'remove_camera_cover').event.valid, false);
+  }
   s = applyHuman(s, 'wait').state;
-  const first = applyTool(s, 'remove_camera_cover');
-  assert.equal(first.event.valid, true);
-  s = first.state;
-  assert.equal(s.robot.visionBlocked, true);
-  assert.equal(s.robot.coverRemovalProgress, 1);
-  assert.equal(s.room.sackOnFloor, false);
-  assert.equal(applyTool(s, 'remove_camera_cover').event.valid, false);
-  s = applyHuman(s, 'wait').state;
-  const second = applyTool(s, 'remove_camera_cover');
-  s = second.state;
+  const last = applyTool(s, 'remove_camera_cover');
+  s = last.state;
   assert.equal(s.robot.visionBlocked, false);
   assert.equal(s.room.sackOnFloor, true);
   assert.equal(observe(s).camera.vision, 'full');
@@ -117,6 +119,9 @@ test('camera removal waits the initial response then requires two consecutive ro
   assert.equal(retrieved.state.room.sackOnFloor, false);
   const far = applyHuman(applyHuman(s, 'move', { zone: 'safe' }).state, 'retrieve_sack');
   assert.equal(far.event.valid, false);
+  const covering = applyHuman(applyHuman(s, 'wait').state, 'cover_robot');
+  assert.equal(covering.event.valid, false);
+  assert.match(covering.event.text, /on the floor/);
 });
 test('another robot action interrupts sack removal without uncovering the camera', () => {
   let s = applyHuman(covered(), 'wait').state;
@@ -142,8 +147,10 @@ test('removing a sack leaves darkness and smoke intact and lowers weapons', () =
     }
     s = applyTool(s, 'remove_camera_cover').state;
     assert.equal(s.robot.ready, null);
-    s = applyHuman(s, 'wait').state;
-    s = applyTool(s, 'remove_camera_cover').state;
+    for (let i = 0; i < 2; i++) {
+      s = applyHuman(s, 'wait').state;
+      s = applyTool(s, 'remove_camera_cover').state;
+    }
     assert.equal(s.robot.visionBlocked, false);
     assert.equal(observe(s).camera.vision, obstruction);
     assert.equal(availableTools(s).includes('fire_live_round'), false);

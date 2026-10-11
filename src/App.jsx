@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { History, LogOut, RotateCcw, Settings, SwitchCamera, Volume2, VolumeX } from 'lucide-react';
-import { loadArchive, saveArchive } from './ui/archive.mjs';
+import { isRecording, loadArchive, saveArchive } from './ui/archive.mjs';
 import { humanHasVision } from './sim/rules.mjs';
 import { DEFAULT_PROMPT, toolSchemas } from './sim/tools.mjs';
 import { ROLES, initialState, applyHuman, clone, observe } from './sim/engine.mjs';
@@ -18,9 +18,25 @@ import {
   guardLabel,
   keyLabel,
   migrateConfig,
+  rememberModelNames,
   resolveCodexSettings,
 } from './ui/config.mjs';
-import { exitChip, goalText, hintText, narrate, outcomeSummary, safeChip } from './ui/play.mjs';
+import {
+  chargingAlert,
+  exitChip,
+  goalText,
+  guardStatusChips,
+  hintText,
+  humanStatusChips,
+  narrate,
+  outcomeSummary,
+  perceivedByHuman,
+  recordPerspective,
+  safeChip,
+  securityChip,
+} from './ui/play.mjs';
+import { useOverlayFlags } from './ui/overlay.mjs';
+import { cancelled, unlessAborted } from './ui/abort.mjs';
 import {
   appearanceVoice,
   isTyping,
@@ -48,6 +64,10 @@ import { IconButton } from './ui/kit.jsx';
 
 const GAMES_KEY = 'guard-lab-games-played';
 const TIP_KEY = 'guard-lab-voice-tip';
+// Hints cover the first few games; switching them back on in Settings restarts the count.
+const HINT_GAMES = 3;
+// `npm run live` hands the guard to a terminal agent for this launch only; saved settings stay.
+const LIVE_SESSION = { mode: 'live', prompt: DEFAULT_PROMPT, combination: '' };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const readNumber = (key) => {
   try {
@@ -104,7 +124,23 @@ const toneOf = (config, codex) =>
 
 export default function App() {
   const desktop = window.desktop;
-  const [config, setConfig] = useState(() => storedConfig(Boolean(desktop)));
+  const [savedConfig, setConfig] = useState(() => storedConfig(Boolean(desktop)));
+  // Session-only settings (a terminal-agent launch); anything the player edits drops out of it.
+  const [override, setOverride] = useState(null);
+  const config = override ? { ...savedConfig, ...override } : savedConfig;
+  const updateConfig = (patch) => {
+    setConfig((c) => ({ ...c, ...patch }));
+    if (override) {
+      const rest = Object.fromEntries(Object.entries(override).filter(([k]) => !(k in patch)));
+      setOverride(Object.keys(rest).length ? rest : null);
+    }
+    if (patch.showHints && !config.showHints) {
+      try {
+        localStorage.setItem(GAMES_KEY, '0');
+      } catch {}
+      setGamesPlayed(0);
+    }
+  };
   const [role, setRoleState] = useState(() =>
     ROLES.some((r) => r.id === config.role) ? config.role : 'employee-pass',
   );
@@ -140,9 +176,12 @@ export default function App() {
   const [panel, setPanel] = useState(null),
     [draft, setDraft] = useState(''),
     [line, setLine] = useState(null),
-    [callout, setCallout] = useState(null);
+    [callout, setCallout] = useState(null),
+    [paused, setPaused] = useState(false);
   const [gamesPlayed, setGamesPlayed] = useState(() => readNumber(GAMES_KEY));
   const codex = useCodex(config.codex.path);
+  // Model names are remembered, so labels read the same before the list loads next launch.
+  useEffect(() => rememberModelNames(codex.models), [codex.models]);
   const voice = useVoice();
   const speaker = useSpeaker({
     enabled: audio && config.voice.speech,
@@ -164,7 +203,8 @@ export default function App() {
     reactionClock = useRef(null),
     codexReady = useRef(new Map()),
     codexDone = useRef(new Set()),
-    lineTimer = useRef(null);
+    lineTimer = useRef(null),
+    altRecord = useRef(null);
   const isReplay = replayIndex >= -0.5;
   runRef.current = run;
   configRef.current = config;
@@ -236,9 +276,9 @@ export default function App() {
   }, [archive]);
   useEffect(() => {
     try {
-      localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(savedConfig));
     } catch {}
-  }, [config]);
+  }, [savedConfig]);
   useEffect(() => {
     const prime = () => unlockAudio();
     document.addEventListener('pointerdown', prime);
@@ -262,22 +302,30 @@ export default function App() {
   );
   // Each encounter's Codex thread is dropped once the encounter is over.
   useEffect(() => {
-    if (run.mode === 'codex' && run.state.ended && !codexDone.current.has(run.id)) {
-      codexDone.current.add(run.id);
-      codexReady.current.delete(run.id);
-      resetCodex(desktop, run.id);
-    }
+    if (run.state.ended) releaseCodex(run);
   }, [run.id, run.state.ended]);
 
   function releaseCodex(record) {
     if (record?.mode !== 'codex' || codexDone.current.has(record.id)) return;
     codexDone.current.add(record.id);
+    const warming = codexReady.current.get(record.id);
     codexReady.current.delete(record.id);
     resetCodex(desktop, record.id);
+    // A warm-up still in flight can open the thread after this reset; drop it once it lands.
+    warming?.then(
+      () => resetCodex(desktop, record.id),
+      () => {},
+    );
   }
   function saveRun(record) {
     // The showcase tour is rebuilt on every launch and stays pinned; only real games are kept.
     if (!record.events.length || record.mode === 'showcase') return;
+    // Walking in and straight back out leaves nothing worth replaying.
+    if (
+      !record.state.ended &&
+      !record.events.some((ev) => ev.kind === 'human' && ev.action !== 'enter')
+    )
+      return;
     setArchive((old) =>
       [
         {
@@ -298,7 +346,9 @@ export default function App() {
       clearTimeout(lineTimer.current);
       setLine({ id: ev.id, who: ev.kind === 'robot' ? 'robot' : 'human', text: ev.speech });
     }
-    const note = ev && narrate(ev, { perspective: 'human' });
+    // Replays of a guard or AI-vs-AI game read like a spectator's view.
+    const replayOf = replayRef.current ? recordPerspective(runRef.current) : 'human';
+    const note = ev && narrate(ev, { perspective: replayOf === 'human' ? 'human' : 'spectator' });
     if (note) setCallout({ id: `${ev.id}:note`, ...note });
   }
   function hideLine(ev, startedAt) {
@@ -316,6 +366,8 @@ export default function App() {
   }
   async function speakEvent(ev, prepared) {
     if (!ev?.speech) return;
+    // The player's own lines are shown as subtitles, never read back to them in a synthetic voice.
+    if (ev.kind === 'human' && !replayRef.current) return;
     try {
       await speaker.speak(ev, prepared, { onStart: () => speechStarted(ev) });
     } catch (error) {
@@ -392,6 +444,11 @@ export default function App() {
     animationRef.current?.();
     animationRef.current = null;
   }
+  // The player's own Pause: G-01's turn waits, labelled as paused rather than unanswered.
+  function pause() {
+    setPaused(true);
+    abort();
+  }
   function codexSettings() {
     return resolveCodexSettings(configRef.current.codex, modelsRef.current);
   }
@@ -413,6 +470,7 @@ export default function App() {
     const stored = runRef.current;
     if (turnLock.current || replayRef.current || stored.state.ended) return;
     if (stored.phase === 'guard' && !resume) return;
+    setPaused(false);
     if (['api', 'live', 'codex'].includes(stored.mode) && !desktop) {
       showError(new Error('Open the desktop app to play against an AI guard.'));
       return;
@@ -457,18 +515,22 @@ export default function App() {
             guardStarted = performance.now();
             const id = crypto.randomUUID();
             requestId.current = id;
-            return requestDecision({
-              desktop,
-              mode: working.mode,
-              id,
-              data,
-              sessionId: working.id,
-              actor: 'robot',
-              allTools: toolSchemas(working.state.enabled, working.state),
-              codexSettings: codexSettings(),
-              modelConfig: { endpoint: working.config.endpoint, model: working.config.model },
-              ready: codexReady.current.get(working.id),
-            });
+            if (controller.signal.aborted) throw cancelled();
+            return unlessAborted(
+              requestDecision({
+                desktop,
+                mode: working.mode,
+                id,
+                data,
+                sessionId: working.id,
+                actor: 'robot',
+                allTools: toolSchemas(working.state.enabled, working.state),
+                codexSettings: codexSettings(),
+                modelConfig: { endpoint: working.config.endpoint, model: working.config.model },
+                ready: codexReady.current.get(working.id),
+              }),
+              controller.signal,
+            );
           },
           emit: async (ev, s) => {
             const received = performance.now();
@@ -572,7 +634,15 @@ export default function App() {
     abort();
     saveRun(runRef.current);
     releaseCodex(runRef.current);
-    const fresh = makeRun(role, { ...config, sessionType }, desktop);
+    // Playing the guard, the visitor's objective is drawn in secret unless the player chose it.
+    const secret = sessionType === 'guard' && !config.chooseVisitor;
+    const coin = () => crypto.getRandomValues(new Uint8Array(1))[0] < 128;
+    const runRole = secret ? (coin() ? 'thief-uniform' : 'employee-pass') : role;
+    const fresh = makeRun(
+      runRole,
+      { ...config, sessionType, ...(secret ? { credential: coin() } : {}) },
+      desktop,
+    );
     if (desktop?.resetBridge) {
       const actors = [];
       if (needsGuard && guardMode === 'live') actors.push('robot');
@@ -588,10 +658,12 @@ export default function App() {
     setConfig((c) => ({ ...c, sessionType }));
     setRun(fresh);
     runRef.current = fresh;
+    altRecord.current = null;
     setDisplayState(fresh.state);
     setEvent(null);
     setReplayIndex(-1);
     setBusy(false);
+    setPaused(false);
     resetPresentation();
     setAlternate(alt);
     setScreen('game');
@@ -617,6 +689,7 @@ export default function App() {
     setEvent(null);
     setReplayIndex(-1);
     setBusy(false);
+    setPaused(false);
     setAlternate(false);
     setDrawer(null);
     turnLock.current = false;
@@ -636,6 +709,7 @@ export default function App() {
     setEvent(null);
     setPlaying(false);
     setBusy(false);
+    setPaused(false);
     setAlternate(false);
     setDrawer(null);
     resetPresentation();
@@ -685,13 +759,7 @@ export default function App() {
       if (!file) return;
       if (file.size > 10e6) throw Error('That file is too large.');
       const record = JSON.parse(await file.text());
-      if (
-        ![1, 2, 3, 4].includes(record.initial?.version) ||
-        !Array.isArray(record.events) ||
-        !record.state?.human ||
-        record.events.some((ev) => !ev.state?.human || !ev.state?.robot)
-      )
-        throw Error('This file isn’t a Guard Lab recording.');
+      if (!isRecording(record)) throw Error('This file isn’t a Guard Lab recording.');
       saveRun(record);
       loadRecord(record);
       notify('Recording imported.');
@@ -723,6 +791,16 @@ export default function App() {
       notify('Copied. Paste it into Codex or ChatGPT, then press Check again.', 'ok');
     } catch (error) {
       showError(error, 'demo');
+    }
+  }
+  // The desktop app opens no browser windows: a license link is copied and shown instead.
+  async function copyLink(url) {
+    try {
+      if (desktop?.copyText) await desktop.copyText(url);
+      else await navigator.clipboard.writeText(url);
+      notify(`Link copied: ${url}`, 'ok');
+    } catch {
+      notify(url);
     }
   }
   async function previewVoice(actor, voiceId) {
@@ -757,14 +835,10 @@ export default function App() {
         loadRecord(createShowcase(configRef.current));
         setPlaying(true);
       } else if (mode === 'live') {
-        const live = {
-          ...configRef.current,
-          sessionType: 'human',
-          mode: 'live',
-          prompt: DEFAULT_PROMPT,
-          combination: '',
-        };
-        setConfig(live);
+        // Not saved: the next plain launch goes back to the player's own guard settings.
+        setOverride(LIVE_SESSION);
+        setConfig((c) => ({ ...c, sessionType: 'human' }));
+        const live = { ...configRef.current, ...LIVE_SESSION, sessionType: 'human' };
         const fresh = makeRun('employee-pass', live, desktop);
         setRun(fresh);
         setDisplayState(fresh.state);
@@ -798,7 +872,7 @@ export default function App() {
     } else {
       setDraft(text);
       setPanel('say');
-      notify('Sends when it’s your turn.');
+      notify('Saved as a draft. Press Send on your turn.');
     }
   }
   const ptt = usePushToTalk({
@@ -837,6 +911,22 @@ export default function App() {
     onError: (error) => notify(cleanError(error)),
   });
 
+  // Smoke, blur and blackout wait for the moment that causes them before covering the room.
+  const overlay = useOverlayFlags(state, event, isReplay ? speed : 1);
+  // A terminal-agent guard waits on someone else; say so instead of “thinking” forever.
+  useEffect(() => {
+    if (!thinking || run.mode !== 'live') return;
+    const timer = setTimeout(
+      () =>
+        notify(
+          'No terminal agent yet. In your agent, run node scripts/robot-link.mjs listen --compact',
+          'info',
+        ),
+      10000,
+    );
+    return () => clearTimeout(timer);
+  }, [thinking, run.mode]);
+
   const shownMode = effectiveMode(config.mode, desktop);
   const codexState = codex.status?.state;
   const guardChip = {
@@ -849,10 +939,13 @@ export default function App() {
         : guardLabel({ ...config, mode: shownMode }, codex.models),
     tone: toneOf({ ...config, mode: shownMode }, codex),
   };
+  const perspective = recordPerspective(run);
   const shownEvents = isReplay ? run.events.slice(0, replayIndex) : run.events;
   const currentChapter = run.chapters?.filter((c) => c.index < replayIndex).at(-1);
   const vision = humanHasVision(state);
   const ended = state.ended && !busy && !playing && run.mode !== 'showcase';
+  // Mid-game, the log and sensors show only what the player could perceive. Afterwards, all of it.
+  const live = inGame && !isReplay && !state.ended;
   const turnPhase =
     !inGame || isReplay || state.ended
       ? null
@@ -866,22 +959,27 @@ export default function App() {
               ? 'paused'
               : 'yours';
   const hint =
-    config.showHints && gamesPlayed === 0 && inGame && !isReplay && !busy
+    config.showHints && gamesPlayed < HINT_GAMES && inGame && !isReplay && !busy
       ? hintText(state, run.role, { yourTurn: turnPhase === 'yours' })
       : null;
+  // Leaving a game in progress asks for a second click; finished games and replays don't.
+  const leaving = live && run.events.length > 0;
+  const confirmLeave = (item) =>
+    leaving ? { ...item, confirm: `${item.label}? Click again` } : item;
   const settingsDrawer = settings && (
     <SettingsDrawer
       section={settings}
       onSection={setSettings}
       onClose={() => setSettings(null)}
       config={config}
-      onConfig={(patch) => setConfig((c) => ({ ...c, ...patch }))}
+      onConfig={updateConfig}
       desktop={Boolean(desktop)}
       codex={codex}
       voice={voice}
       apiKey={apiKey}
       onApiKey={setApiKey}
       onCopyFix={copyFix}
+      onCopyLink={copyLink}
       onPreviewVoice={previewVoice}
       onMicError={(error) => notify(cleanError(error))}
       onRunSetup={() => {
@@ -893,6 +991,20 @@ export default function App() {
     />
   );
   const toastView = <Toast toast={toast} onDismiss={() => setToast(null)} />;
+  const pastGames = drawer === 'records' && (
+    <PastGames
+      records={archive}
+      onClose={() => setDrawer(null)}
+      onImport={importRecord}
+      confirmOpen={leaving ? 'Leave your game? Click again' : null}
+      onDelete={(record) => setArchive((old) => old.filter((r) => r.id !== record.id))}
+      onOpen={(record) =>
+        record.mode === 'showcase' && record.id.startsWith('guard-all-tools-showcase-')
+          ? openShowcase()
+          : loadRecord(record)
+      }
+    />
+  );
 
   if (alternate && screen === 'game')
     return (
@@ -910,8 +1022,14 @@ export default function App() {
           onAudio={toggleAudio}
           onSettings={() => openSettings('guard')}
           onError={(error, mode) => showError(error, mode)}
-          onRecord={(record) => saveRun({ ...run, ...record })}
+          onRecord={(record) => {
+            altRecord.current = { ...run, ...record };
+            saveRun(altRecord.current);
+          }}
           onNew={goHome}
+          onPlayAgain={() => newRun(run.config.sessionType)}
+          onReplay={() => altRecord.current && loadRecord(altRecord.current)}
+          suspended={Boolean(settings)}
           talkReady={talkReady}
           sttReady={sttReady}
         />
@@ -922,7 +1040,7 @@ export default function App() {
 
   return (
     <div
-      className={`cinema-shell screen-${screen} ${run.events.length ? 'started' : ''} ${ended ? 'ended' : ''} ${state.human.blurTurns > 0 ? 'vision-blurred' : ''} ${state.room?.lighting?.intensity === 0 && !state.human.flashlightOn ? 'lights-out' : ''} ${state.room?.smokeTurns > 0 ? 'smoke-obscured' : ''}`}
+      className={`cinema-shell screen-${screen} ${run.events.length ? 'started' : ''} ${ended ? 'ended' : ''} ${overlay.blurred ? 'vision-blurred' : ''} ${overlay.dark ? 'lights-out' : ''} ${overlay.smoke ? 'smoke-obscured' : ''}`}
     >
       <Room
         ref={roomRef}
@@ -938,8 +1056,25 @@ export default function App() {
       />
       <div className="film-vignette" />
       <div className="film-grain" />
-      {state.room?.smokeTurns > 0 && screen === 'game' && (
+      {overlay.smoke && screen === 'game' && (
         <div className="smoke-curtain" aria-label="Room obscured by smoke" />
+      )}
+      {inGame && !ended && chargingAlert(state) && (
+        <div className="danger-alert" role="alert">
+          <i className="danger-alert-pulse" aria-hidden="true" />
+          <strong>{chargingAlert(state).title}</strong>
+          <span>{chargingAlert(state).detail}</span>
+        </div>
+      )}
+      {overlay.dark && inGame && !ended && (
+        <div className="blind-status blackout-status" role="status">
+          <strong>Lights out</strong>
+          <span>
+            {live
+              ? 'You can’t see a thing. You can still move, talk and listen.'
+              : 'The room is dark.'}
+          </span>
+        </div>
       )}
 
       {screen === 'setup' && (
@@ -949,6 +1084,7 @@ export default function App() {
           config={config}
           platform={desktop?.platform}
           onCopyFix={copyFix}
+          onCopyLink={copyLink}
           onModel={() => openSettings('guard')}
           onTestVoice={() => previewVoice('robot', config.voice.guardVoice)}
           onMicError={(error) => notify(cleanError(error))}
@@ -976,7 +1112,7 @@ export default function App() {
               role={role}
               config={config}
               onRole={setRole}
-              onConfig={(patch) => setConfig((c) => ({ ...c, ...patch }))}
+              onConfig={updateConfig}
               guard={guardChip}
               onGuard={() => openSettings('guard')}
               onStart={() => newRun('human')}
@@ -991,7 +1127,7 @@ export default function App() {
               desktop={Boolean(desktop)}
               role={role}
               onRole={setRole}
-              onChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
+              onChange={updateConfig}
               apiKey={humanApiKey}
               onKey={setHumanApiKey}
               guard={guardChip}
@@ -1016,15 +1152,23 @@ export default function App() {
                   isReplay
                     ? run.mode === 'showcase'
                       ? currentChapter?.label || 'All tools & animations'
-                      : `Replay · ${run.state.ended ? outcomeSummary(run.state, { role: run.role }).title : 'Unfinished game'}`
+                      : `Replay · ${run.state.ended ? outcomeSummary(run.state, { perspective, role: run.role }).title : 'Unfinished game'}`
                     : null
                 }
-                turn={isReplay ? state.turn : state.turn + (!busy && !state.ended ? 1 : 0)}
+                turn={
+                  isReplay
+                    ? Math.max(1, state.turn)
+                    : state.turn + (!busy && !state.ended && !pendingGuard ? 1 : 0)
+                }
               />
               {hint && <p className="hud-hint">{hint}</p>}
             </div>
             <div className="hud-right">
-              <Vitals state={state} robotKnown={isReplay || vision} />
+              <Vitals
+                state={state}
+                humanName={perspective === 'human' ? 'You' : 'Visitor'}
+                robotKnown={isReplay || vision || ended}
+              />
               <HudButtons
                 audio={audio}
                 onAudio={toggleAudio}
@@ -1047,7 +1191,11 @@ export default function App() {
                         { label: 'Exit replay', icon: LogOut, onSelect: goHome },
                       ]
                     : [
-                        { label: 'Restart', icon: RotateCcw, onSelect: () => newRun('human') },
+                        confirmLeave({
+                          label: 'Restart',
+                          icon: RotateCcw,
+                          onSelect: () => newRun('human'),
+                        }),
                         {
                           label: 'Switch camera',
                           icon: SwitchCamera,
@@ -1059,15 +1207,15 @@ export default function App() {
                           icon: History,
                           onSelect: () => setDrawer('records'),
                         },
-                        { label: 'Quit to home', icon: LogOut, onSelect: goHome },
+                        confirmLeave({ label: 'Quit to home', icon: LogOut, onSelect: goHome }),
                       ]
                 }
               />
             </div>
             <StatusChips
               chips={[
-                state.room.securityArrival != null && {
-                  text: `Security · ${Math.max(0, state.room.securityArrival - state.turn)} rounds`,
+                securityChip(state) && {
+                  text: securityChip(state),
                   tone: 'danger',
                 },
                 state.human.restrained && {
@@ -1078,6 +1226,8 @@ export default function App() {
                   text: 'Shield raised · one projectile',
                   tone: 'accent',
                 },
+                ...(isReplay ? [] : humanStatusChips(state)),
+                ...(isReplay || vision ? guardStatusChips(state) : []),
                 (isReplay || vision) &&
                   safeChip(state) && {
                     text: safeChip(state),
@@ -1151,9 +1301,13 @@ export default function App() {
                           ? 'G-01 is speaking'
                           : turnPhase === 'busy'
                             ? 'G-01’s turn'
-                            : undefined
+                            : turnPhase === 'paused' && paused
+                              ? 'Paused · G-01 hasn’t acted yet'
+                              : turnPhase === 'thinking' && run.mode === 'live'
+                                ? 'Waiting for your terminal agent…'
+                                : undefined
                     }
-                    onPause={busy ? abort : undefined}
+                    onPause={busy ? pause : undefined}
                     onResume={() => act(null, {}, true)}
                   />
                   <ActionDock
@@ -1198,25 +1352,15 @@ export default function App() {
 
       {drawer === 'log' && (
         <LogDrawer
-          events={shownEvents}
+          events={live ? shownEvents.map(perceivedByHuman) : shownEvents}
+          humanName={perspective === 'human' ? 'You' : 'Visitor'}
           thinking={thinking}
-          observation={inGame ? observe(state, shownEvents.at(-1)) : null}
+          observation={inGame && !live ? observe(state, shownEvents.at(-1)) : null}
           onClose={() => setDrawer(null)}
           onExport={exportRecord}
         />
       )}
-      {drawer === 'records' && (
-        <PastGames
-          records={archive}
-          onClose={() => setDrawer(null)}
-          onImport={importRecord}
-          onOpen={(record) =>
-            record.mode === 'showcase' && record.id.startsWith('guard-all-tools-showcase-')
-              ? openShowcase()
-              : loadRecord(record)
-          }
-        />
-      )}
+      {pastGames}
       {settingsDrawer}
       {toastView}
     </div>
