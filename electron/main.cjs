@@ -216,6 +216,9 @@ ipcMain.handle('file:export', async (_, record) => {
 const codex = registerCodex({ ipcMain, getWindow: () => window });
 const voice = registerVoice({ ipcMain, getWindow: () => window, app });
 app.whenReady().then(async () => {
+  // macOS ignores BrowserWindow.icon; packaged builds carry the icon, source runs set the Dock.
+  if (process.platform === 'darwin' && !app.isPackaged)
+    app.dock?.setIcon(path.join(__dirname, '../public/icon.png'));
   const protocol = await bridge;
   await Promise.allSettled(
     ['robot', 'human'].map((actor) => protocol.resetChannel(bridgeDirectory(actor))),
